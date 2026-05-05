@@ -29,6 +29,8 @@ class FakeConnection:
         self.alias: str | None = None
         self.subscriptions: set[str] = set()
         self.dm_filter: list[str] = ["*"]
+        self.wire_from_filter: list[str] | None = None
+        self.wire_to_filter: list[str] = ["*"]
         self.notifications: list[tuple[str, dict[str, Any]]] = []
 
     @property
@@ -43,8 +45,21 @@ class FakeConnection:
     def from_addr(self) -> str:
         return f"home:{self.home}#{self.sid}"
 
+    @property
+    def is_watching(self) -> bool:
+        return self.wire_from_filter is not None
+
     def matches_dm_filter(self, from_addr: str) -> bool:
         return any(fnmatch.fnmatchcase(from_addr, p) for p in self.dm_filter)
+
+    def matches_wire_filter(self, from_addr: str, to_addr: str) -> bool:
+        if not self.is_watching:
+            return False
+        from_patterns = self.wire_from_filter or []
+        to_patterns = self.wire_to_filter or []
+        from_ok = any(fnmatch.fnmatchcase(from_addr, p) for p in from_patterns)
+        to_ok = any(fnmatch.fnmatchcase(to_addr, p) for p in to_patterns)
+        return from_ok and to_ok
 
     async def send_notification(self, method: str, params: dict[str, Any]) -> None:
         self.notifications.append((method, params))
@@ -343,3 +358,120 @@ async def test_history_for_topic(router: Router) -> None:
         await router.publish(publisher, "build", {"i": i})
     res = await router.history(publisher, "topic:build", since=None, limit=10)
     assert len(res["messages"]) == 3
+
+
+# --- wire observation -----------------------------------------------------
+
+
+async def test_watch_receives_dm(router: Router) -> None:
+    sender = FakeConnection()
+    target = FakeConnection()
+    watcher = FakeConnection()
+    await router.hello(sender, SID_A, "/tmp/x")
+    await router.hello(target, SID_B, "/tmp/y")
+    await router.hello(watcher, SID_C, "/tmp/observer")
+    await router.watch(watcher, include=None, from_filter=None, to_filter=None)
+    watcher.notifications.clear()
+    target.notifications.clear()
+    res = await router.send(sender, f"home:/tmp/y#{SID_B}", "hello", None)
+    assert res["delivered"] == 1
+    methods = [m for m, _ in watcher.notifications]
+    assert methods.count("peer.wire_message") == 1
+    wire = next(p for m, p in watcher.notifications if m == "peer.wire_message")
+    assert wire["body"] == "hello"
+    assert wire["delivered"] == 1
+    assert wire["queued"] is False
+    # Recipient still gets peer.message, not peer.wire_message
+    target_methods = [m for m, _ in target.notifications]
+    assert "peer.message" in target_methods
+    assert "peer.wire_message" not in target_methods
+
+
+async def test_watch_receives_topic_publish(router: Router) -> None:
+    publisher = FakeConnection()
+    subscriber = FakeConnection()
+    watcher = FakeConnection()
+    await router.hello(publisher, SID_A, "/tmp/x")
+    await router.hello(subscriber, SID_B, "/tmp/y")
+    await router.hello(watcher, SID_C, "/tmp/observer")
+    await router.subscribe(subscriber, "build", 0)
+    await router.watch(watcher, include=None, from_filter=None, to_filter=None)
+    watcher.notifications.clear()
+    res = await router.publish(publisher, "build", {"status": "green"})
+    assert res["subscribers"] == 1
+    wire = [p for m, p in watcher.notifications if m == "peer.wire_message"]
+    assert len(wire) == 1
+    assert wire[0]["to"] == "topic:build"
+    assert wire[0]["delivered"] == 1
+    assert wire[0]["queued"] is False
+
+
+async def test_watch_does_not_echo_sender(router: Router) -> None:
+    sender = FakeConnection()
+    target = FakeConnection()
+    await router.hello(sender, SID_A, "/tmp/x")
+    await router.hello(target, SID_B, "/tmp/y")
+    await router.watch(sender, include=None, from_filter=None, to_filter=None)
+    sender.notifications.clear()
+    await router.send(sender, f"home:/tmp/y#{SID_B}", "hi", None)
+    methods = [m for m, _ in sender.notifications]
+    assert "peer.wire_message" not in methods
+
+
+async def test_watch_filter_from(router: Router) -> None:
+    a = FakeConnection()
+    b = FakeConnection()
+    watcher = FakeConnection()
+    await router.hello(a, SID_A, "/tmp/x")
+    await router.hello(b, SID_B, "/tmp/y")
+    await router.hello(watcher, SID_C, "/tmp/observer")
+    # Only observe messages whose from is from /tmp/x
+    await router.watch(
+        watcher, include=None, from_filter=["home:/tmp/x*"], to_filter=None
+    )
+    watcher.notifications.clear()
+    # b sends to a — should NOT be observed
+    await router.send(b, f"home:/tmp/x#{SID_A}", "from-b", None)
+    # a sends to b — SHOULD be observed
+    await router.send(a, f"home:/tmp/y#{SID_B}", "from-a", None)
+    wire_bodies = [
+        p["body"] for m, p in watcher.notifications if m == "peer.wire_message"
+    ]
+    assert wire_bodies == ["from-a"]
+
+
+async def test_watch_marks_queued_dm(router: Router) -> None:
+    sender = FakeConnection()
+    watcher = FakeConnection()
+    await router.hello(sender, SID_A, "/tmp/x")
+    await router.hello(watcher, SID_B, "/tmp/observer")
+    await router.watch(watcher, include=None, from_filter=None, to_filter=None)
+    watcher.notifications.clear()
+    res = await router.send(sender, "home:/tmp/elsewhere", "drop", None)
+    assert res["delivered"] == 0
+    wire = next(p for m, p in watcher.notifications if m == "peer.wire_message")
+    assert wire["delivered"] == 0
+    assert wire["queued"] is True
+
+
+async def test_unwatch_stops_emission(router: Router) -> None:
+    sender = FakeConnection()
+    target = FakeConnection()
+    watcher = FakeConnection()
+    await router.hello(sender, SID_A, "/tmp/x")
+    await router.hello(target, SID_B, "/tmp/y")
+    await router.hello(watcher, SID_C, "/tmp/observer")
+    await router.watch(watcher, include=None, from_filter=None, to_filter=None)
+    await router.unwatch(watcher)
+    watcher.notifications.clear()
+    await router.send(sender, f"home:/tmp/y#{SID_B}", "hi", None)
+    methods = [m for m, _ in watcher.notifications]
+    assert "peer.wire_message" not in methods
+
+
+async def test_watch_rejects_unsupported_include(router: Router) -> None:
+    watcher = FakeConnection()
+    await router.hello(watcher, SID_A, "/tmp/observer")
+    with pytest.raises(PeerError) as ei:
+        await router.watch(watcher, include=["presence"], from_filter=None, to_filter=None)
+    assert ei.value.code == INVALID_PARAMS

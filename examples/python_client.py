@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reference Python client for the peer/1 protocol.
+"""Reference Python client for the blemees-peer/1 protocol.
 
 Demonstrates connecting, sending a DM, subscribing to a topic, and
 receiving notifications. Run two copies in two terminals to see them

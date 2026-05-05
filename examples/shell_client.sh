@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tiny shell client for peer/1 — useful for poking blemees-peerd from the
+# Tiny shell client for blemees-peer/1 — useful for poking blemees-peerd from the
 # command line. Requires `socat` and `jq`.
 #
 # Usage:

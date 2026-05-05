@@ -1,4 +1,4 @@
-"""Async ``peer/1`` client.
+"""Async ``blemees-peer/1`` client.
 
 Used by the MCP sidecar, by tests, and as a reference implementation
 of the protocol. Speaks newline-delimited JSON-RPC 2.0 over the
@@ -36,7 +36,7 @@ class RemoteError(Exception):
 
 
 class PeerClient:
-    """Async client for the ``peer/1`` JSON-RPC protocol."""
+    """Async client for the ``blemees-peer/1`` JSON-RPC protocol."""
 
     def __init__(self, socket_path: Path | str) -> None:
         self.socket_path = Path(socket_path)
@@ -187,6 +187,30 @@ class PeerClient:
         if since is not None:
             params["since"] = since
         return await self._call("peer.history", params)
+
+    async def watch(
+        self,
+        include: list[str] | None = None,
+        from_filter: list[str] | None = None,
+        to_filter: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Subscribe to wire observation. See ``peer.watch`` in the SPEC.
+
+        After this call, ``peer.wire_message`` notifications arrive on
+        the standard notification queue alongside any ``peer.message``
+        notifications the connection is also entitled to.
+        """
+        params: dict[str, Any] = {}
+        if include is not None:
+            params["include"] = list(include)
+        if from_filter is not None:
+            params["from_filter"] = list(from_filter)
+        if to_filter is not None:
+            params["to_filter"] = list(to_filter)
+        return await self._call("peer.watch", params)
+
+    async def unwatch(self) -> dict[str, Any]:
+        return await self._call("peer.unwatch", {})
 
     # ------------------------------------------------------------------
     # Notification access

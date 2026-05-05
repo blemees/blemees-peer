@@ -1,4 +1,4 @@
-"""Stdio MCP sidecar — exposes peer/1 to agents as MCP tools + resources.
+"""Stdio MCP sidecar — exposes blemees-peer/1 to agents as MCP tools + resources.
 
 This is a minimal hand-rolled MCP server that runs on stdin/stdout.
 It speaks JSON-RPC 2.0 with the MCP host (Claude Code, Codex, etc.)

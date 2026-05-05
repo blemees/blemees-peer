@@ -186,6 +186,69 @@ class Router:
         return {"ok": True, "patterns": list(patterns)}
 
     # ------------------------------------------------------------------
+    # Wire observation
+    # ------------------------------------------------------------------
+
+    async def watch(
+        self,
+        conn: Connection,
+        include: list[str] | None,
+        from_filter: list[str] | None,
+        to_filter: list[str] | None,
+    ) -> dict[str, Any]:
+        _require_hello(conn)
+        if include is None:
+            include = ["messages"]
+        if not isinstance(include, list) or not all(isinstance(s, str) for s in include):
+            raise PeerError(INVALID_PARAMS, "include must be a list of strings")
+        unsupported = [s for s in include if s != "messages"]
+        if unsupported:
+            raise PeerError(
+                INVALID_PARAMS,
+                f"unsupported include kinds: {unsupported!r}; v0.1 supports only 'messages'",
+            )
+        if from_filter is None:
+            from_filter = ["*"]
+        if to_filter is None:
+            to_filter = ["*"]
+        if not isinstance(from_filter, list) or not all(isinstance(p, str) for p in from_filter):
+            raise PeerError(INVALID_PARAMS, "from_filter must be a list of strings")
+        if not isinstance(to_filter, list) or not all(isinstance(p, str) for p in to_filter):
+            raise PeerError(INVALID_PARAMS, "to_filter must be a list of strings")
+        conn.wire_from_filter = list(from_filter)
+        conn.wire_to_filter = list(to_filter)
+        return {"ok": True, "watching": True}
+
+    async def unwatch(self, conn: Connection) -> dict[str, Any]:
+        _require_hello(conn)
+        conn.wire_from_filter = None
+        conn.wire_to_filter = ["*"]
+        return {"ok": True, "watching": False}
+
+    async def _fanout_to_watchers(
+        self,
+        msg: Message,
+        delivered: int,
+        queued: bool,
+        sender_sid: str | None,
+    ) -> None:
+        """Emit ``peer.wire_message`` to every watching connection whose
+        filter matches, except the sender."""
+        params = {
+            **msg.to_wire(),
+            "delivered": delivered,
+            "queued": queued,
+        }
+        for sid, watcher in list(self.connections.items()):
+            if sid == sender_sid:
+                continue
+            if not watcher.is_watching:
+                continue
+            if not watcher.matches_wire_filter(msg.from_addr, msg.to):
+                continue
+            await watcher.send_notification("peer.wire_message", params)
+
+    # ------------------------------------------------------------------
     # DMs
     # ------------------------------------------------------------------
 
@@ -226,8 +289,11 @@ class Router:
             await target.send_notification("peer.message", msg.to_wire())
             delivered += 1
 
-        if delivered == 0:
+        queued = delivered == 0
+        if queued:
             self.persistence.dms.get(to).append(msg)
+
+        await self._fanout_to_watchers(msg, delivered=delivered, queued=queued, sender_sid=conn.sid)
 
         return {"message_id": msg.message_id, "delivered": delivered}
 
@@ -289,6 +355,11 @@ class Router:
                 continue
             await target.send_notification("peer.message", msg.to_wire())
             delivered += 1
+
+        await self._fanout_to_watchers(
+            msg, delivered=delivered, queued=False, sender_sid=conn.sid
+        )
+
         return {"message_id": msg.message_id, "subscribers": delivered}
 
     async def subscribe(

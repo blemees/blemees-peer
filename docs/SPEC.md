@@ -1,7 +1,7 @@
 # blemees-peer (`blemees-peerd`) — Peer communication daemon
 
 **Version:** 0.1
-**Protocol:** `peer/1`
+**Protocol:** `blemees-peer/1`
 **Language:** Python 3.11+, stdlib only
 **Target OS:** Linux, macOS
 
@@ -20,7 +20,7 @@ continue to work, just without peer messaging.
                        ┌────────────────┐
                        │      TUI       │
                        └────────┬───────┘
-                                │ blemees/2 (operator)
+                                │ blemees-agent/1 (operator)
                        ┌────────▼───────┐
                        │ blemees-agentd │  spawns agents
                        └─┬────────────┬─┘
@@ -30,12 +30,13 @@ continue to work, just without peer messaging.
                   │ agent A  │  │ agent B  │  (MCP sidecar
                   │ (claude) │  │ (codex)  │   added via the
                   └────┬─────┘  └────┬─────┘   agent's own MCP
-                       │ peer/1     │          config — see §9)
+                       │            │           config — see §9)
+                       │  blemees-peer/1
                        └─────┬──────┘
                              ▼
-                       ┌──────────┐
+                       ┌──────────────┐
                        │ blemees-peerd│  routes + persists
-                       └──────────┘
+                       └──────────────┘
 ```
 
 `blemees-peerd` knows nothing about `blemees-agentd`, and `blemees-agentd` knows nothing
@@ -269,6 +270,59 @@ Returns `{"topics": [{"name": "...", "subscribers": <int>, "last_message_at": <t
 ```
 Returns `{"messages": [...]}` from persisted log.
 
+### `peer.watch`
+
+```json
+{"include":     ["messages"],          // optional; default ["messages"]
+ "from_filter": ["*"],                 // optional; fnmatch over `from` field
+ "to_filter":   ["*"]}                 // optional; fnmatch over `to` field
+```
+
+Returns `{"ok": true, "watching": true}`.
+
+Subscribes the connection to **wire observation**: a copy of every
+`peer.send` and `peer.publish` flowing through `blemees-peerd`,
+delivered as `peer.wire_message` notifications (§6). Used by the
+TUI to render agent-to-agent traffic that would otherwise be opaque
+to the operator.
+
+`include` selects which kinds of wire events to receive. v0.1 only
+supports `"messages"` (DMs and topic publishes); future kinds may
+include `"presence"` for join/leave/alias-changed events as
+explicit wire entries (today those go through their own
+notifications and a watcher already sees them as a regular peer).
+
+`from_filter` and `to_filter` are fnmatch glob patterns over the
+canonical address strings. Default `["*"]` (accept all). Empty list
+`[]` blocks everything in that direction (mostly useful with the
+opposite filter to scope by direction).
+
+A connection's own outbound messages (those it itself originated
+via `peer.send` or `peer.publish`) are **not** echoed back as
+`peer.wire_message` notifications — the sender already has the
+content. Other watchers see it normally.
+
+A connection that calls `peer.watch` continues to function as a
+normal peer: it still receives `peer.message` notifications for
+DMs addressed to it and topic subscriptions it holds. Wire events
+are *additional* and arrive on a different notification method
+(see §6 `peer.wire_message`), so a peer that is both a recipient
+and a watcher will not see the same message twice with the same
+method name.
+
+Re-calling `peer.watch` replaces the previous subscription's
+filter and include set on this connection.
+
+### `peer.unwatch`
+
+```json
+{}
+```
+
+Returns `{"ok": true, "watching": false}`. Stops wire observation
+on this connection. Idempotent — calling on an unwatched
+connection is a no-op.
+
 ## 6. Notifications (server → client)
 
 ### `peer.message`
@@ -308,6 +362,49 @@ Emitted when any session sets, changes, or clears its alias.
 
 Emitted if `blemees-peerd` evicts a subscription (e.g. server shutdown grace).
 
+### `peer.wire_message`
+
+```json
+{"message_id": "msg_...",
+ "from":       "home:~/foo#sess_abc",
+ "from_alias": "architect",
+ "to":         "home:~/bar" | "home:~/bar#sess_xyz" | "topic:build-events",
+ "body":       <any-json>,
+ "reply_to":   "msg_...",
+ "ts":         1717000000.123,
+ "delivered":  2,                   // live recipients (DM) or subscribers (topic)
+ "queued":     false}               // true if no live recipients and the DM was queued
+```
+
+Emitted to every wire-watcher (§5 `peer.watch`) for every
+`peer.send` and `peer.publish` whose `from` and `to` match the
+watcher's filters. The sender does not receive a copy of its own
+messages on this method.
+
+The fields up to `ts` mirror `peer.message` exactly. The two extra
+fields are observability-only:
+
+- `delivered` is the count of live peers the message reached
+  immediately (recipients for a DM, subscribers for a topic).
+  Watchers can use this to flag messages that fanned out vs ones
+  that landed nowhere.
+- `queued` is `true` for DMs where `delivered == 0` and the
+  message was placed in the offline-DM queue per §7. `false` for
+  all topic publishes (topic publishes are not queued).
+
+`peer.wire_message` and `peer.message` are separate notification
+methods on purpose: a connection that is both a recipient and a
+watcher gets `peer.message` for messages addressed to it (the
+recipient view) and `peer.wire_message` for everything else
+matching its watch filter (the observer view), with no overlap.
+
+**Trust model.** Wire observation is gated only by the Unix socket
+permission — same as any other `blemees-peer/1` capability. Any process
+that can connect can `peer.watch` and see all traffic. This is
+intentional and consistent with §3: the boundary is "same user,
+same machine"; privacy of DM contents from the user themselves is
+not a goal of `blemees-peerd`.
+
 ## 7. Delivery & persistence
 
 | Class  | Queue                                  | Persistence                                    |
@@ -337,7 +434,7 @@ Emitted if `blemees-peerd` evicts a subscription (e.g. server shutdown grace).
 ## 9. Agent integration
 
 `blemees-agentd` is not involved. A peer client is anything that connects
-to the socket and speaks `peer/1`; two flavors are expected:
+to the socket and speaks `blemees-peer/1`; two flavors are expected:
 
 1. **MCP sidecar (recommended).** A standalone Python entry point
    `blemees-peer-mcp` ships in this package. The user adds it to
@@ -365,7 +462,7 @@ to the socket and speaks `peer/1`; two flavors are expected:
    otherwise falls back to `os.getcwd()` + `mint_sid()`, and
    connects to `blemees-peerd` at the conventional socket path.
 
-2. **Direct `peer/1` client.** Anything that speaks newline-delimited
+2. **Direct `blemees-peer/1` client.** Anything that speaks newline-delimited
    JSON-RPC 2.0 over the Unix socket. Reference clients for Python
    and shell live in `examples/`.
 

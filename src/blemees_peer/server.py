@@ -214,6 +214,8 @@ class Server:
             "peer.list_peers": self._h_list_peers,
             "peer.list_topics": self._h_list_topics,
             "peer.history": self._h_history,
+            "peer.watch": self._h_watch,
+            "peer.unwatch": self._h_unwatch,
         }
 
     async def _h_hello(self, conn: Connection, params: dict[str, Any]) -> dict[str, Any]:
@@ -284,6 +286,15 @@ class Server:
         if since is not None and not isinstance(since, str):
             raise PeerError(INVALID_PARAMS, "since must be a string or omitted")
         return await self.router.history(conn, address, since, limit)
+
+    async def _h_watch(self, conn: Connection, params: dict[str, Any]) -> dict[str, Any]:
+        include = params.get("include")
+        from_filter = params.get("from_filter")
+        to_filter = params.get("to_filter")
+        return await self.router.watch(conn, include, from_filter, to_filter)
+
+    async def _h_unwatch(self, conn: Connection, params: dict[str, Any]) -> dict[str, Any]:
+        return await self.router.unwatch(conn)
 
 
 Handler = Callable[[Connection, dict[str, Any]], Awaitable[dict[str, Any]]]

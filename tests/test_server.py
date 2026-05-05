@@ -182,3 +182,55 @@ async def test_list_peers_reflects_state(client_factory) -> None:
     by_home = {p["peer_id"]: p for p in info["peers"]}
     assert by_home["home:/tmp/peer-test-A"]["sessions"][0]["alias"] == "alpha"
     assert by_home["home:/tmp/peer-test-B"]["sessions"][0]["alias"] == "bravo"
+
+
+# --- wire observation -----------------------------------------------------
+
+
+async def test_wire_observation_sees_dms_and_topics(client_factory) -> None:
+    sender = await client_factory(home="/tmp/peer-test-sender")
+    target = await client_factory(home="/tmp/peer-test-target")
+    watcher = await client_factory(home="/tmp/peer-test-watcher")
+    await target.subscribe("builds")
+    res = await watcher.watch()
+    assert res["watching"] is True
+    watcher.drain_notifications()
+    target.drain_notifications()
+
+    # DM
+    await sender.send(to="home:/tmp/peer-test-target", body="hi-dm")
+    # Topic publish
+    await sender.publish("builds", {"x": 1})
+
+    wire_msgs: list[dict] = []
+    for _ in range(8):
+        try:
+            note = await watcher.next_notification(timeout=2.0)
+        except TimeoutError:
+            break
+        if note["method"] == "peer.wire_message":
+            wire_msgs.append(note["params"])
+
+    assert len(wire_msgs) == 2
+    assert {m["to"] for m in wire_msgs} == {"home:/tmp/peer-test-target", "topic:builds"}
+    delivered = {m["to"]: m["delivered"] for m in wire_msgs}
+    assert delivered == {"home:/tmp/peer-test-target": 1, "topic:builds": 1}
+
+
+async def test_wire_observation_unwatch(client_factory) -> None:
+    sender = await client_factory(home="/tmp/peer-test-sender")
+    await client_factory(home="/tmp/peer-test-target")
+    watcher = await client_factory(home="/tmp/peer-test-watcher")
+    await watcher.watch()
+    await watcher.unwatch()
+    watcher.drain_notifications()
+    await sender.send(to="home:/tmp/peer-test-target", body="hi")
+    # No wire_message should appear within a short window
+    seen: list[str] = []
+    for _ in range(3):
+        try:
+            note = await watcher.next_notification(timeout=0.5)
+        except TimeoutError:
+            break
+        seen.append(note["method"])
+    assert "peer.wire_message" not in seen

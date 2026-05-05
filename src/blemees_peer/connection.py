@@ -33,6 +33,11 @@ class Connection:
         self.alias: str | None = None
         self.subscriptions: set[str] = set()
         self.dm_filter: list[str] = ["*"]
+        # Wire observation: when not None, this connection receives
+        # peer.wire_message notifications for every send/publish
+        # matching the configured filters. None = not watching.
+        self.wire_from_filter: list[str] | None = None
+        self.wire_to_filter: list[str] = ["*"]
         self.outbox: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         self.closed = False
         self._writer_task: asyncio.Task[None] | None = None
@@ -55,6 +60,20 @@ class Connection:
 
     def matches_dm_filter(self, from_addr: str) -> bool:
         return any(fnmatch.fnmatchcase(from_addr, p) for p in self.dm_filter)
+
+    @property
+    def is_watching(self) -> bool:
+        return self.wire_from_filter is not None
+
+    def matches_wire_filter(self, from_addr: str, to_addr: str) -> bool:
+        """True if a wire message with the given from/to should be emitted to this watcher."""
+        if not self.is_watching:
+            return False
+        from_patterns = self.wire_from_filter or []
+        to_patterns = self.wire_to_filter or []
+        from_ok = any(fnmatch.fnmatchcase(from_addr, p) for p in from_patterns)
+        to_ok = any(fnmatch.fnmatchcase(to_addr, p) for p in to_patterns)
+        return from_ok and to_ok
 
     async def send_response(self, request_id: Any, result: Any) -> None:
         await self._enqueue({"jsonrpc": "2.0", "id": request_id, "result": result})
