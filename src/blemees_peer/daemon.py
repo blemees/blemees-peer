@@ -55,9 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["debug", "info", "warning", "error"],
         default="info",
     )
-    p.add_argument(
-        "--version", action="version", version=f"blemees-peerd {__version__}"
-    )
+    p.add_argument("--version", action="version", version=f"blemees-peerd {__version__}")
     return p
 
 

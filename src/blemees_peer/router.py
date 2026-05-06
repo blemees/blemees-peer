@@ -356,9 +356,7 @@ class Router:
             await target.send_notification("peer.message", msg.to_wire())
             delivered += 1
 
-        await self._fanout_to_watchers(
-            msg, delivered=delivered, queued=False, sender_sid=conn.sid
-        )
+        await self._fanout_to_watchers(msg, delivered=delivered, queued=False, sender_sid=conn.sid)
 
         return {"message_id": msg.message_id, "subscribers": delivered}
 

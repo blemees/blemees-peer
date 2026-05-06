@@ -426,17 +426,13 @@ async def test_watch_filter_from(router: Router) -> None:
     await router.hello(b, SID_B, "/tmp/y")
     await router.hello(watcher, SID_C, "/tmp/observer")
     # Only observe messages whose from is from /tmp/x
-    await router.watch(
-        watcher, include=None, from_filter=["home:/tmp/x*"], to_filter=None
-    )
+    await router.watch(watcher, include=None, from_filter=["home:/tmp/x*"], to_filter=None)
     watcher.notifications.clear()
     # b sends to a — should NOT be observed
     await router.send(b, f"home:/tmp/x#{SID_A}", "from-b", None)
     # a sends to b — SHOULD be observed
     await router.send(a, f"home:/tmp/y#{SID_B}", "from-a", None)
-    wire_bodies = [
-        p["body"] for m, p in watcher.notifications if m == "peer.wire_message"
-    ]
+    wire_bodies = [p["body"] for m, p in watcher.notifications if m == "peer.wire_message"]
     assert wire_bodies == ["from-a"]
 
 

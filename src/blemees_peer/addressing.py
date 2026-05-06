@@ -50,7 +50,7 @@ def normalize_path(path: str) -> str:
         return "~"
     home_prefix = user_home + os.sep
     if real.startswith(home_prefix):
-        return "~/" + real[len(home_prefix):]
+        return "~/" + real[len(home_prefix) :]
     return real
 
 

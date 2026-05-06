@@ -50,9 +50,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="write logs to this file in addition to stderr",
     )
-    p.add_argument(
-        "--version", action="version", version=f"blemees-peer-mcp {__version__}"
-    )
+    p.add_argument("--version", action="version", version=f"blemees-peer-mcp {__version__}")
     return p
 
 

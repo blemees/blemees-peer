@@ -78,15 +78,15 @@ def test_is_normalized_accepts(p: str) -> None:
     "p",
     [
         "",
-        "foo",            # relative
-        "~/",             # trailing slash
-        "~/.",            # dot segment
-        "~/..",           # parent segment
-        "/tmp/",          # trailing slash on absolute
-        "/tmp/./foo",     # dot segment in absolute
-        "/tmp/../foo",    # parent segment
-        "/tmp/foo/",      # trailing slash
-        "~",              # ok actually — re-check below
+        "foo",  # relative
+        "~/",  # trailing slash
+        "~/.",  # dot segment
+        "~/..",  # parent segment
+        "/tmp/",  # trailing slash on absolute
+        "/tmp/./foo",  # dot segment in absolute
+        "/tmp/../foo",  # parent segment
+        "/tmp/foo/",  # trailing slash
+        "~",  # ok actually — re-check below
     ],
 )
 def test_is_normalized_rejects(p: str) -> None:

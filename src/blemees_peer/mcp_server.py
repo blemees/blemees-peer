@@ -647,6 +647,7 @@ class _OfflinePeerClient:
     def __getattr__(self, name: str) -> Callable[..., Awaitable[dict[str, Any]]]:
         async def stub(*args: Any, **kwargs: Any) -> dict[str, Any]:
             raise RemoteError(-32099, f"blemees-peerd unavailable: {self.reason}")
+
         return stub
 
 
