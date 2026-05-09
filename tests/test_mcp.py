@@ -87,6 +87,14 @@ async def _recv_until_id(
 
 @pytest.fixture
 async def mcp_proc(peerd_server, tmp_socket_path: Path):
+    # Mirror the production "no alias" state: BLEMEES_AGENT_ALIAS unset.
+    # blemees-agentd only exports it when the caller asked for an alias
+    # (see blemees-agent/blemees_agent/backends/__init__.py), so the
+    # absence of the env var is the canonical "anonymous" identity.
+    # We unset it here defensively because the developer running the
+    # test suite may themselves be in a Claude session that exports
+    # BLEMEES_AGENT_ALIAS, which would otherwise leak into the child.
+    env = {k: v for k, v in __import__("os").environ.items() if k != "BLEMEES_AGENT_ALIAS"}
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
@@ -99,6 +107,7 @@ async def mcp_proc(peerd_server, tmp_socket_path: Path):
         "sess_MCP1MCP1MCP1MCP1",
         "--log-level",
         "warning",
+        env=env,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -142,7 +151,164 @@ async def test_initialize_and_tools_list(mcp_proc) -> None:
         "peer_list_peers",
         "peer_list_topics",
         "peer_history",
+        "peer_whoami",
     } <= tool_names
+
+
+async def test_initialize_instructions_includes_identity(mcp_proc) -> None:
+    """The initialize response carries identity context in the 'instructions'
+    field so the MCP host can splice the agent's own address into its
+    system prompt — closing the gap where a session has no way to learn
+    its own sid/alias from a tool call alone.
+    """
+    await _send(mcp_proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    init = await _recv_until_id(mcp_proc, 1)
+    instructions = init["result"].get("instructions")
+    assert isinstance(instructions, str) and instructions
+    # Identity facts that must be reachable from the system prompt:
+    assert "sess_MCP1MCP1MCP1MCP1" in instructions
+    assert "home:/tmp/peer-test-mcp" in instructions
+    # No alias was set for this fixture, so should mention that path.
+    assert "no alias claimed" in instructions
+    assert "peer_whoami" in instructions  # advertises the runtime re-check
+
+
+async def test_initialize_instructions_includes_alias_when_claimed(
+    peerd_server,
+    tmp_socket_path: Path,
+) -> None:
+    """When BLEMEES_AGENT_ALIAS is honored at startup, the initialize
+    'instructions' field should reflect the claimed alias, not the sid.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "blemees_peer.mcp",
+        "--socket",
+        str(tmp_socket_path),
+        "--home",
+        "/tmp/peer-test-instructions",
+        "--sid",
+        "sess_INSTRUCT00000000",
+        "--log-level",
+        "warning",
+        env={
+            **__import__("os").environ,
+            "BLEMEES_AGENT_ALIAS": "planner",
+        },
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        await _send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        init = await _recv_until_id(proc, 1)
+        instructions = init["result"]["instructions"]
+        assert "'planner'" in instructions
+        assert "sess_INSTRUCT00000000" in instructions
+        assert "home:/tmp/peer-test-instructions#planner" in instructions
+    finally:
+        if proc.returncode is None:
+            if proc.stdin is not None:
+                proc.stdin.close()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3.0)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+
+
+async def test_peer_whoami_without_alias(mcp_proc) -> None:
+    await _send(mcp_proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    await _recv_until_id(mcp_proc, 1)
+    await _send(
+        mcp_proc,
+        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+    )
+    await _send(
+        mcp_proc,
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "peer_whoami", "arguments": {}},
+        },
+    )
+    resp = await _recv_until_id(mcp_proc, 2)
+    assert resp["result"]["isError"] is False
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    assert payload == {
+        "peer_id": "home:/tmp/peer-test-mcp",
+        "sid": "sess_MCP1MCP1MCP1MCP1",
+        "alias": None,
+        "address": "home:/tmp/peer-test-mcp#sess_MCP1MCP1MCP1MCP1",
+    }
+
+
+async def test_peer_whoami_tracks_set_alias(mcp_proc) -> None:
+    """After peer_set_alias succeeds, peer_whoami must reflect the new
+    alias and address — otherwise an agent that calls set_alias has no
+    way to learn its post-claim address.
+    """
+    await _send(mcp_proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    await _recv_until_id(mcp_proc, 1)
+    await _send(
+        mcp_proc,
+        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+    )
+    await _send(
+        mcp_proc,
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "peer_set_alias",
+                "arguments": {"alias": "courier"},
+            },
+        },
+    )
+    resp = await _recv_until_id(mcp_proc, 2)
+    assert resp["result"]["isError"] is False
+
+    await _send(
+        mcp_proc,
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "peer_whoami", "arguments": {}},
+        },
+    )
+    resp = await _recv_until_id(mcp_proc, 3)
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    assert payload["alias"] == "courier"
+    assert payload["address"] == "home:/tmp/peer-test-mcp#courier"
+
+    # Clearing the alias should drop us back to the sid form.
+    await _send(
+        mcp_proc,
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "peer_set_alias", "arguments": {"alias": ""}},
+        },
+    )
+    await _recv_until_id(mcp_proc, 4)
+    await _send(
+        mcp_proc,
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "peer_whoami", "arguments": {}},
+        },
+    )
+    resp = await _recv_until_id(mcp_proc, 5)
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    assert payload["alias"] is None
+    assert payload["address"].endswith("#sess_MCP1MCP1MCP1MCP1")
 
 
 async def test_peer_send_via_tool_call(mcp_proc, peerd_server, tmp_socket_path) -> None:

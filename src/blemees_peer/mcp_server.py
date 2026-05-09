@@ -158,6 +158,7 @@ class McpServer:
         self.home = home
         self.sid = sid
         self.initial_alias = alias
+        self.current_alias: str | None = None
         self.peer = PeerClient(socket_path)
         self.rpc = StdioJsonRpc()
         self.inbox: deque[dict[str, Any]] = deque(maxlen=INBOX_MAXLEN)
@@ -189,6 +190,7 @@ class McpServer:
         if self.initial_alias:
             try:
                 await self.peer.set_alias(self.initial_alias)
+                self.current_alias = self.initial_alias
                 log.info("claimed alias %r at startup", self.initial_alias)
             except (RemoteError, RuntimeError) as e:
                 # Most likely cause: another live session in the same
@@ -266,7 +268,41 @@ class McpServer:
                 "name": "blemees-peer-mcp",
                 "version": __version__,
             },
+            "instructions": self._build_instructions(),
         }
+
+    def _build_instructions(self) -> str:
+        """Identity context surfaced to the MCP host's system prompt.
+
+        The MCP spec lets the server return free-form ``instructions`` in
+        the initialize response; Claude Code and other hosts splice this
+        into the model's context. We use it to tell the agent who *it*
+        is on the peer mesh — sid, home, and (if claimed) alias — so it
+        doesn't have to infer its own address from inbox events.
+        """
+        peer_id = f"home:{self.home}"
+        if self.current_alias:
+            address = f"{peer_id}#{self.current_alias}"
+            identity = (
+                f"You are connected to the blemees-peer mesh as session "
+                f"'{self.current_alias}' (sid {self.sid}) at peer '{peer_id}'.\n"
+                f"Your address is {address} — other sessions can DM you "
+                f"using that address (or by sid: {peer_id}#{self.sid})."
+            )
+        else:
+            address = f"{peer_id}#{self.sid}"
+            identity = (
+                f"You are connected to the blemees-peer mesh as session "
+                f"{self.sid} at peer '{peer_id}' (no alias claimed).\n"
+                f"Your address is {address} — other sessions can DM you "
+                f"using that address. Use peer_set_alias to claim a "
+                f"human-meaningful name."
+            )
+        return (
+            identity
+            + "\nUse peer_whoami at any time to re-check your identity "
+            "(e.g. after calling peer_set_alias)."
+        )
 
     async def _h_initialized(self, params: dict[str, Any]) -> None:
         log.info(
@@ -420,7 +456,24 @@ async def _tool_await(s: McpServer, args: dict[str, Any]) -> Any:
 
 
 async def _tool_set_alias(s: McpServer, args: dict[str, Any]) -> Any:
-    return await s.peer.set_alias(args.get("alias", ""))
+    alias = args.get("alias", "")
+    result = await s.peer.set_alias(alias)
+    # Mirror the daemon's now-current state so peer_whoami stays accurate.
+    # Empty string clears the alias; any non-empty value that round-tripped
+    # without raising is the new alias.
+    s.current_alias = alias or None
+    return result
+
+
+async def _tool_whoami(s: McpServer, args: dict[str, Any]) -> Any:
+    peer_id = f"home:{s.home}"
+    disc = s.current_alias or s.sid
+    return {
+        "peer_id": peer_id,
+        "sid": s.sid,
+        "alias": s.current_alias,
+        "address": f"{peer_id}#{disc}",
+    }
 
 
 async def _tool_set_dm_filter(s: McpServer, args: dict[str, Any]) -> Any:
@@ -458,6 +511,7 @@ _TOOL_IMPLS: dict[str, Callable[[McpServer, dict[str, Any]], Awaitable[Any]]] = 
     "peer_list_peers": _tool_list_peers,
     "peer_list_topics": _tool_list_topics,
     "peer_history": _tool_history,
+    "peer_whoami": _tool_whoami,
 }
 
 
@@ -589,6 +643,17 @@ _TOOLS: list[dict[str, Any]] = [
             },
             "required": ["address"],
         },
+    },
+    {
+        "name": "peer_whoami",
+        "description": (
+            "Return this session's own identity on the peer mesh: "
+            "peer_id (home:<path>), sid, current alias (or null), and "
+            "the full address other peers should DM. Useful after "
+            "peer_set_alias or to confirm the address baked into the "
+            "MCP initialize 'instructions' is still current."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
     },
 ]
 
