@@ -49,6 +49,9 @@ class Server:
         self.router = Router(persistence)
         self._server: asyncio.AbstractServer | None = None
         self._connections: set[Connection] = set()
+        self._handler_tasks: set[asyncio.Task[Any]] = set()
+        self._closing = False
+        self._stopped = asyncio.Event()
         self._handlers: dict[str, Handler] = self._build_handlers()
 
     async def start(self) -> None:
@@ -82,14 +85,26 @@ class Server:
     async def serve_forever(self) -> None:
         if self._server is None:
             raise RuntimeError("server not started")
-        async with self._server:
-            await self._server.serve_forever()
+        # The listener is already accepting (start_serving=True). Don't use
+        # ``async with self._server`` or ``AbstractServer.serve_forever()``:
+        # both await ``wait_closed()`` on exit, which on Python >= 3.12 blocks
+        # until every connection handler returns. Idle handlers sit in
+        # ``readuntil()`` forever, so that deadlocks. ``shutdown()`` owns the
+        # close ordering instead.
+        await self._stopped.wait()
 
     async def shutdown(self) -> None:
+        self._closing = True
         if self._server is not None:
             self._server.close()
-            with contextlib.suppress(Exception):
-                await self._server.wait_closed()
+        # Cancel live handlers before awaiting wait_closed(). Each handler's
+        # finally block runs goodbye() and closes its Connection. Loop in case
+        # a connection accepted just before close() registers late.
+        while self._handler_tasks:
+            tasks = list(self._handler_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         # Close connections in parallel
         if self._connections:
             await asyncio.gather(
@@ -97,6 +112,10 @@ class Server:
                 return_exceptions=True,
             )
             self._connections.clear()
+        if self._server is not None:
+            with contextlib.suppress(Exception):
+                await self._server.wait_closed()
+        self._stopped.set()
         self.socket_path.unlink(missing_ok=True)
         log.info("shut down")
 
@@ -105,6 +124,18 @@ class Server:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        if self._closing:
+            # Accepted just before shutdown closed the listener.
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            return
+        task = asyncio.current_task()
+        assert task is not None
+        self._handler_tasks.add(task)
+        # A done-callback, not the finally block: a cancel that lands during
+        # cleanup must still drop the task, or shutdown() would spin.
+        task.add_done_callback(self._handler_tasks.discard)
         conn = Connection(reader, writer)
         self._connections.add(conn)
         conn.start_writer()
