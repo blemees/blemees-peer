@@ -100,11 +100,16 @@ class Server:
         # Cancel live handlers before awaiting wait_closed(). Each handler's
         # finally block runs goodbye() and closes its Connection. Loop in case
         # a connection accepted just before close() registers late.
-        while self._handler_tasks:
-            tasks = list(self._handler_tasks)
-            for task in tasks:
+        #
+        # Gather only unfinished tasks: a handler that just finished may still
+        # be in the set (its discard callback is queued, not run), and on
+        # Python >= 3.12 gather() over finished tasks completes without
+        # yielding — looping on the set alone would spin forever (#10).
+        while pending := [t for t in self._handler_tasks if not t.done()]:
+            for task in pending:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._handler_tasks.clear()
         # Close connections in parallel
         if self._connections:
             await asyncio.gather(
