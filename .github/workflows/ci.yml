@@ -13,6 +13,7 @@ jobs:
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -60,6 +61,7 @@ jobs:
   package:
     name: Build sdist + wheel
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
