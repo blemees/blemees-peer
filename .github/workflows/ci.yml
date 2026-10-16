@@ -44,6 +44,7 @@ jobs:
           - os: macos-latest
             python: "3.13"
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
