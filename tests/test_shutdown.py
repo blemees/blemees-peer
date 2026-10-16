@@ -57,6 +57,35 @@ async def test_shutdown_with_idle_clients_is_prompt(
             await serve_task
 
 
+async def test_shutdown_with_finished_but_unreaped_handler_task(
+    tmp_state_dir: Path,
+    tmp_socket_path: Path,
+) -> None:
+    # A handler can finish in the same loop step that shutdown() starts, so
+    # its done-callback (which drops it from _handler_tasks) has not run yet.
+    # On Python >= 3.12, gather() over only-finished tasks completes without
+    # yielding, so shutdown() must not wait for that callback (#10).
+    server = Server(tmp_socket_path, Persistence(tmp_state_dir))
+    await server.start()
+    serve_task = asyncio.create_task(server.serve_forever())
+
+    async def _finished() -> None:
+        return None
+
+    unreaped = asyncio.create_task(_finished())
+    await unreaped
+    server._handler_tasks.add(unreaped)
+
+    try:
+        await asyncio.wait_for(server.shutdown(), timeout=SHUTDOWN_BUDGET_S)
+        await asyncio.wait_for(serve_task, timeout=SHUTDOWN_BUDGET_S)
+        assert not server._handler_tasks
+    finally:
+        serve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve_task
+
+
 def test_daemon_exits_promptly_on_sigterm_with_idle_client(
     tmp_state_dir: Path,
     tmp_socket_path: Path,
