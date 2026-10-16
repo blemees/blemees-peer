@@ -299,8 +299,7 @@ class McpServer:
                 f"human-meaningful name."
             )
         return (
-            identity
-            + "\nUse peer_whoami at any time to re-check your identity "
+            identity + "\nUse peer_whoami at any time to re-check your identity "
             "(e.g. after calling peer_set_alias)."
         )
 
