@@ -10,12 +10,17 @@ onto the wire without interleaving them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import json
 import logging
 from typing import Any
 
 log = logging.getLogger("blemees-peerd.connection")
+
+# Upper bound for each step of Connection.close(): draining the outbox, then
+# closing the transport.
+CLOSE_TIMEOUT_S = 2.0
 
 
 class Connection:
@@ -125,13 +130,19 @@ class Connection:
             return
         self.closed = True
         await self.outbox.put(None)
-        if self._writer_task is not None:
-            try:
-                await asyncio.wait_for(self._writer_task, timeout=2.0)
-            except (TimeoutError, asyncio.CancelledError):
-                self._writer_task.cancel()
         try:
-            self.writer.close()
-            await self.writer.wait_closed()
-        except Exception:
-            pass
+            if self._writer_task is not None:
+                try:
+                    await asyncio.wait_for(self._writer_task, timeout=CLOSE_TIMEOUT_S)
+                except TimeoutError:
+                    self._writer_task.cancel()
+        finally:
+            # Close the transport even when we are cancelled, but let the
+            # cancel propagate: swallowing it can leave a cancelled handler
+            # running past shutdown (#10).
+            with contextlib.suppress(Exception):
+                self.writer.close()
+        # Bounded: wait_closed() waits for the flush of any buffered data,
+        # which never ends if the peer stops reading.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self.writer.wait_closed(), timeout=CLOSE_TIMEOUT_S)
