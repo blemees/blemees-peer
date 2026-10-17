@@ -168,6 +168,8 @@ class McpServer:
         self.inbox: deque[dict[str, Any]] = deque(maxlen=INBOX_MAXLEN)
         self.subscribed_resources: set[str] = set()
         self._inbox_event = asyncio.Event()
+        # Set once the forwarder stops: no more notifications will arrive.
+        self._peer_gone = False
         self._initialized = False
         self._register_handlers()
 
@@ -188,7 +190,7 @@ class McpServer:
         try:
             hello = await self.peer.hello(self.sid, self.home)
             log.info("hello ok: %s", hello)
-        except (RemoteError, RuntimeError) as e:
+        except (RemoteError, RuntimeError, ConnectionError) as e:
             log.error("hello failed: %s", e)
 
         if self.initial_alias:
@@ -196,7 +198,7 @@ class McpServer:
                 await self.peer.set_alias(self.initial_alias)
                 self.current_alias = self.initial_alias
                 log.info("claimed alias %r at startup", self.initial_alias)
-            except (RemoteError, RuntimeError) as e:
+            except (RemoteError, RuntimeError, ConnectionError) as e:
                 # Most likely cause: another live session in the same
                 # home already holds this alias. Don't crash; the
                 # session is still addressable by sid and the agent
@@ -222,8 +224,13 @@ class McpServer:
                 note = await self.peer.next_notification()
             except asyncio.CancelledError:
                 raise
+            except ConnectionError:
+                log.warning("blemees-peerd connection lost")
+                self._mark_peer_gone()
+                return
             except Exception:
                 log.exception("notification fetch failed")
+                self._mark_peer_gone()
                 return
             method = note.get("method")
             params = note.get("params") or {}
@@ -243,6 +250,11 @@ class McpServer:
                     "notifications/resources/updated",
                     {"uri": "peer://peers"},
                 )
+
+    def _mark_peer_gone(self) -> None:
+        """Wake ``peer_await`` callers: the inbox will never fill again."""
+        self._peer_gone = True
+        self._inbox_event.set()
 
     # ------------------------------------------------------------------
     # MCP method handlers
@@ -442,6 +454,8 @@ async def _tool_await(s: McpServer, args: dict[str, Any]) -> Any:
         if not s.inbox:
             s._inbox_event.clear()
         return msg
+    if s._peer_gone:
+        raise RemoteError(-32099, "blemees-peerd connection lost")
     s._inbox_event.clear()
     try:
         if timeout_s is None:
@@ -455,6 +469,8 @@ async def _tool_await(s: McpServer, args: dict[str, Any]) -> Any:
         if not s.inbox:
             s._inbox_event.clear()
         return msg
+    if s._peer_gone:
+        raise RemoteError(-32099, "blemees-peerd connection lost")
     return {"timeout": True}
 
 
