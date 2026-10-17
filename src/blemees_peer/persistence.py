@@ -17,6 +17,7 @@ import collections
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from blemees_peer.messages import Message
@@ -69,6 +70,23 @@ class PersistentDeque:
         self.deque.clear()
         self.path.unlink(missing_ok=True)
         return msgs
+
+    def drain_matching(self, predicate: Callable[[Message], bool]) -> list[Message]:
+        """Remove and return the messages for which *predicate* is true.
+
+        The rest stay queued in their original order, and the file is
+        rewritten (or deleted if nothing is left).
+        """
+        taken: list[Message] = []
+        kept: list[Message] = []
+        for msg in self.deque:
+            (taken if predicate(msg) else kept).append(msg)
+        if not taken:
+            return []
+        self.deque.clear()
+        self.deque.extend(kept)
+        self._flush()
+        return taken
 
     def clear(self) -> None:
         self.deque.clear()

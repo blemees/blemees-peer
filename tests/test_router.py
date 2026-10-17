@@ -267,6 +267,43 @@ async def test_dm_filter_blocks_inbound(router: Router) -> None:
     assert router.persistence.dms.has_messages(f"home:/tmp/bar#{SID_B}")
 
 
+async def test_drain_keeps_dms_rejected_by_filter(router: Router, tmp_path: Path) -> None:
+    friend = FakeConnection()
+    stranger = FakeConnection()
+    await router.hello(friend, SID_A, "/tmp/foo")
+    await router.hello(stranger, SID_C, "/tmp/baz")
+    await router.send(friend, "home:/tmp/bar#architect", "f1", None)
+    await router.send(stranger, "home:/tmp/bar#architect", "s1", None)
+    await router.send(friend, "home:/tmp/bar#architect", "f2", None)
+    await router.send(stranger, "home:/tmp/bar#architect", "s2", None)
+
+    # Receiver only accepts DMs from /tmp/foo, then claims the alias
+    target = FakeConnection()
+    await router.hello(target, SID_B, "/tmp/bar")
+    await router.set_dm_filter(target, ["home:/tmp/foo*"])
+    target.notifications.clear()
+    await router.set_alias(target, "architect")
+    got = [p["body"] for m, p in target.notifications if m == "peer.message"]
+    assert got == ["f1", "f2"]
+
+    # The rejected DMs stay queued, in order, and on disk
+    buf = router.persistence.dms.get("home:/tmp/bar#architect")
+    assert [m.body for m in buf] == ["s1", "s2"]
+    reloaded = Persistence(tmp_path / "state")
+    reloaded.load_all()
+    assert [m.body for m in reloaded.dms.buffers["home:/tmp/bar#architect"]] == ["s1", "s2"]
+
+    # A later claimant without a filter receives them
+    await router.set_alias(target, "")
+    late = FakeConnection()
+    await router.hello(late, "sess_DDDDDDDDDDDDDDDD", "/tmp/bar")
+    late.notifications.clear()
+    await router.set_alias(late, "architect")
+    got = [p["body"] for m, p in late.notifications if m == "peer.message"]
+    assert got == ["s1", "s2"]
+    assert not router.persistence.dms.has_messages("home:/tmp/bar#architect")
+
+
 # --- topics -----------------------------------------------------------------
 
 

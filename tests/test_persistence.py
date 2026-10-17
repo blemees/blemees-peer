@@ -61,6 +61,24 @@ def test_persistent_deque_drain_removes_file(tmp_path: Path) -> None:
     assert len(buf) == 0
 
 
+def test_persistent_deque_drain_matching_keeps_rest(tmp_path: Path) -> None:
+    path = tmp_path / "x.jsonl"
+    buf = PersistentDeque(path, maxlen=10)
+    for i in range(5):
+        buf.append(_make_msg(body=f"m{i}"))
+    drained = buf.drain_matching(lambda m: m.body in ("m1", "m3"))
+    assert [m.body for m in drained] == ["m1", "m3"]
+    assert [m.body for m in buf] == ["m0", "m2", "m4"]
+
+    fresh = PersistentDeque(path, maxlen=10)
+    fresh.load()
+    assert [m.body for m in fresh.deque] == ["m0", "m2", "m4"]
+
+    buf.drain_matching(lambda m: True)
+    assert len(buf) == 0
+    assert not path.exists()
+
+
 def test_persistent_deque_history_since(tmp_path: Path) -> None:
     path = tmp_path / "x.jsonl"
     buf = PersistentDeque(path, maxlen=10)
