@@ -129,6 +129,14 @@ class PeerClient:
                 if not isinstance(msg, dict):
                     continue
                 if "id" in msg and ("result" in msg or "error" in msg):
+                    if msg["id"] is None and "error" in msg:
+                        err = msg["error"]
+                        log.warning(
+                            "blemees-peerd rejected a request it could not identify: %s %s",
+                            err.get("code"),
+                            err.get("message"),
+                        )
+                        continue
                     fut = self._pending.pop(msg["id"], None)
                     if fut is None or fut.done():
                         continue

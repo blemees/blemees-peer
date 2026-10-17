@@ -489,22 +489,21 @@ async def test_oversize_stdin_line_gets_parse_error_and_serve_continues(mcp_proc
     assert mcp_proc.stdin is not None
     mcp_proc.stdin.write(b"x" * (MAX_LINE_BYTES + 1024) + b"\n")
     await mcp_proc.stdin.drain()
+    err = await _recv(mcp_proc)
+    assert err is not None
+    assert "id" in err and err["id"] is None, err
+    assert err["error"]["code"] == -32700, err
     await _send(mcp_proc, {"jsonrpc": "2.0", "id": 7, "method": "ping", "params": {}})
-    seen: list[dict[str, Any]] = []
-    while True:
-        msg = await _recv(mcp_proc)
-        if msg is None:
-            pytest.fail("MCP sidecar closed stdout unexpectedly")
-        seen.append(msg)
-        if msg.get("id") == 7:
-            break
-    assert "result" in seen[-1]
+    assert "result" in await _recv_until_id(mcp_proc, 7)
 
-    # The sidecar drops id-less errors from the wire and logs them instead;
-    # accept either form of the -32700 reply.
-    mcp_proc.stdin.close()
-    await asyncio.wait_for(mcp_proc.wait(), timeout=5.0)
-    assert mcp_proc.stderr is not None
-    stderr = (await mcp_proc.stderr.read()).decode()
-    on_wire = any(m.get("error", {}).get("code") == -32700 for m in seen)
-    assert on_wire or ("-32700" in stderr and "line exceeds size limit" in stderr)
+
+async def test_invalid_json_stdin_line_gets_parse_error_with_null_id(mcp_proc) -> None:
+    assert mcp_proc.stdin is not None
+    mcp_proc.stdin.write(b"{not json\n")
+    await mcp_proc.stdin.drain()
+    err = await _recv(mcp_proc)
+    assert err is not None
+    assert "id" in err and err["id"] is None, err
+    assert err["error"]["code"] == -32700, err
+    await _send(mcp_proc, {"jsonrpc": "2.0", "id": 8, "method": "ping", "params": {}})
+    assert "result" in await _recv_until_id(mcp_proc, 8)
