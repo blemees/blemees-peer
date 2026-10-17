@@ -151,10 +151,14 @@ class Server:
                         log.debug("client disconnected with partial line; discarding")
                     break
                 except LineTooLongError:
-                    await self._send_error(conn, None, PARSE_ERROR, "line exceeds size limit")
+                    await self._send_unidentified_error(
+                        conn, PARSE_ERROR, "line exceeds size limit"
+                    )
                     continue
                 if len(line) > MAX_LINE_BYTES:
-                    await self._send_error(conn, None, PARSE_ERROR, "line exceeds size limit")
+                    await self._send_unidentified_error(
+                        conn, PARSE_ERROR, "line exceeds size limit"
+                    )
                     continue
                 await self._dispatch_line(conn, line)
         except (ConnectionResetError, BrokenPipeError):
@@ -173,10 +177,12 @@ class Server:
         try:
             request = json.loads(text)
         except json.JSONDecodeError as e:
-            await self._send_error(conn, None, PARSE_ERROR, f"invalid JSON: {e.msg}")
+            await self._send_unidentified_error(conn, PARSE_ERROR, f"invalid JSON: {e.msg}")
             return
         if not isinstance(request, dict):
-            await self._send_error(conn, None, INVALID_REQUEST, "request must be a JSON object")
+            await self._send_unidentified_error(
+                conn, INVALID_REQUEST, "request must be a JSON object"
+            )
             return
         await self._dispatch(conn, request)
 
@@ -227,10 +233,15 @@ class Server:
         data: Any | None = None,
     ) -> None:
         if request_id is None:
-            # No id → can't return a structured error; just log and drop.
-            log.warning("dropping unidentifiable error: %s %s", code, message)
+            # A notification gets no response, not even an error: log and drop.
+            log.warning("dropping error for notification: %s %s", code, message)
             return
         await conn.send_error(request_id, code, message, data)
+
+    async def _send_unidentified_error(self, conn: Connection, code: int, message: str) -> None:
+        # The line could not be read as a request object, so its id is
+        # unknown. JSON-RPC 2.0 still requires a response, with "id": null.
+        await conn.send_error(None, code, message)
 
     # ------------------------------------------------------------------
     # Handler bindings

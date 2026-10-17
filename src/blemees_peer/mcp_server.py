@@ -68,7 +68,7 @@ class StdioJsonRpc:
             except asyncio.IncompleteReadError:
                 return
             except LineTooLongError:
-                await self._send_error(None, -32700, "line exceeds size limit")
+                await self._send_unidentified_error(-32700, "line exceeds size limit")
                 continue
             text = line.decode("utf-8", errors="replace").strip()
             if not text:
@@ -76,10 +76,10 @@ class StdioJsonRpc:
             try:
                 msg = json.loads(text)
             except json.JSONDecodeError as e:
-                await self._send_error(None, -32700, f"parse error: {e.msg}")
+                await self._send_unidentified_error(-32700, f"parse error: {e.msg}")
                 continue
             if not isinstance(msg, dict):
-                await self._send_error(None, -32600, "request must be a JSON object")
+                await self._send_unidentified_error(-32600, "request must be a JSON object")
                 continue
             task = asyncio.create_task(self._handle_message(msg))
             self._inflight.add(task)
@@ -131,8 +131,23 @@ class StdioJsonRpc:
         data: Any | None = None,
     ) -> None:
         if request_id is None:
-            log.warning("dropping unidentifiable error: %s %s", code, message)
+            # A notification gets no response, not even an error: log and drop.
+            log.warning("dropping error for notification: %s %s", code, message)
             return
+        await self._write_error(request_id, code, message, data)
+
+    async def _send_unidentified_error(self, code: int, message: str) -> None:
+        # The line could not be read as a request object, so its id is
+        # unknown. JSON-RPC 2.0 still requires a response, with "id": null.
+        await self._write_error(None, code, message)
+
+    async def _write_error(
+        self,
+        request_id: Any,
+        code: int,
+        message: str,
+        data: Any | None = None,
+    ) -> None:
         err: dict[str, Any] = {"code": code, "message": message}
         if data is not None:
             err["data"] = data

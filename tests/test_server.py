@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 
 import pytest
 
@@ -336,3 +337,72 @@ async def test_request_too_large_raises_and_connection_still_usable(client_facto
     assert exc.value.code == -32602
     res = await asyncio.wait_for(a.list_peers(), timeout=5.0)
     assert "peers" in res
+
+
+async def test_unidentifiable_lines_get_errors_with_null_id(peerd_server, tmp_socket_path) -> None:
+    reader, writer = await asyncio.open_unix_connection(str(tmp_socket_path), limit=MAX_LINE_BYTES)
+
+    async def send_raw(data: bytes) -> dict:
+        writer.write(data + b"\n")
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=5.0)
+        return json.loads(line)
+
+    try:
+        cases = [
+            (b"{not json", -32700),
+            (b"[1, 2, 3]", -32600),
+            (b'"just a string"', -32600),
+            (b"x" * (MAX_LINE_BYTES + 1024), -32700),
+        ]
+        for data, code in cases:
+            msg = await send_raw(data)
+            assert "id" in msg and msg["id"] is None, msg
+            assert msg["error"]["code"] == code, msg
+        # Same connection still answers a normal request afterwards.
+        req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "peer.hello",
+            "params": {"sid": mint_sid(), "home": "/tmp/peer-test-null-id"},
+        }
+        msg = await send_raw(json.dumps(req).encode())
+        assert msg["id"] == 1 and "result" in msg
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
+async def test_failed_notification_gets_no_response(peerd_server, tmp_socket_path) -> None:
+    reader, writer = await asyncio.open_unix_connection(str(tmp_socket_path), limit=MAX_LINE_BYTES)
+    try:
+        note = {"jsonrpc": "2.0", "method": "peer.does_not_exist", "params": {}}
+        req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "peer.hello",
+            "params": {"sid": mint_sid(), "home": "/tmp/peer-test-note"},
+        }
+        writer.write((json.dumps(note) + "\n" + json.dumps(req) + "\n").encode())
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=5.0)
+        msg = json.loads(line)
+        assert msg.get("id") == 1 and "result" in msg, msg
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
+async def test_client_logs_error_with_null_id(client_factory, caplog) -> None:
+    client = await client_factory()
+    assert client._writer is not None
+    with caplog.at_level(logging.WARNING, logger="blemees-blemees-peerd.client"):
+        client._writer.write(b"{not json\n")
+        await client._writer.drain()
+        # A later call still resolves: the null-id error did not fail it.
+        info = await client.list_peers()
+    assert "peers" in info
+    client_logs = [r for r in caplog.records if r.name == "blemees-blemees-peerd.client"]
+    assert any("-32700" in r.getMessage() for r in client_logs)
