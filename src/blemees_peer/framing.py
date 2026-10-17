@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 
 MAX_LINE_BYTES = 4 * 1024 * 1024  # 4 MiB; messages larger than this are rejected
+# Largest peer.send / peer.publish body peerd accepts. The headroom leaves
+# space for the peer.message / peer.wire_message envelope around the body.
+MAX_BODY_BYTES = MAX_LINE_BYTES - 64 * 1024
 
 
 class LineTooLongError(Exception):

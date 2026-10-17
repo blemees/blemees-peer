@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from blemees_peer.framing import MAX_LINE_BYTES
 from blemees_peer.mcp_server import (
     resolve_alias_at_startup,
     resolve_home_at_startup,
@@ -485,8 +486,6 @@ async def test_tool_call_larger_than_64k(mcp_proc, peerd_server, tmp_socket_path
 
 
 async def test_oversize_stdin_line_gets_parse_error_and_serve_continues(mcp_proc) -> None:
-    from blemees_peer.server import MAX_LINE_BYTES
-
     assert mcp_proc.stdin is not None
     mcp_proc.stdin.write(b"x" * (MAX_LINE_BYTES + 1024) + b"\n")
     await mcp_proc.stdin.drain()

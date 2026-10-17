@@ -430,6 +430,8 @@ not a goal of `blemees-peerd`.
 | Send to unclaimed alias              | Returns `delivered: 0`; queued under `home:<path>#<alias>`; delivered to whoever next claims that alias in that home |
 | Publish to topic with no subscribers | Returns `subscribers: 0`; message still persisted to ring buffer |
 | Connection lost mid-session          | Queued DMs replay on reconnect; topic subscriptions drop and must be re-issued |
+| Line over 4 MiB (frame limit)        | Line discarded; returns `-32700` (no id); connection stays open. A response that would exceed the limit is replaced by a `-32603` error with the same id |
+| `send`/`publish` body over 4 MiB − 64 KiB | Returns `-32602 message too large` (`data.max_body_bytes`); nothing persisted or delivered |
 
 ## 9. Agent integration
 
