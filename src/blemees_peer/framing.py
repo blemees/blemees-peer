@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 MAX_LINE_BYTES = 4 * 1024 * 1024  # 4 MiB; messages larger than this are rejected
 # Largest peer.send / peer.publish body peerd accepts. The headroom leaves
 # space for the peer.message / peer.wire_message envelope around the body.
 MAX_BODY_BYTES = MAX_LINE_BYTES - 64 * 1024
+
+
+def is_valid_id(value: Any) -> bool:
+    """JSON-RPC 2.0 ids are a string, a number or null (a bool is not a number)."""
+    return value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool))
+
+
+def is_response(msg: dict[str, Any]) -> bool:
+    """True for a response object: ``result`` or ``error`` and no ``method``."""
+    return "method" not in msg and ("result" in msg or "error" in msg)
 
 
 class LineTooLongError(Exception):

@@ -275,8 +275,12 @@ class PeerClient:
 
         Raises ``asyncio.TimeoutError`` if *timeout* elapses with no
         notification queued, and ``ConnectionError`` once the connection
-        to blemees-peerd is gone and every earlier notification was read.
+        to blemees-peerd is gone and every earlier notification was read,
+        or if the client never connected.
         """
+        if self._writer is None:
+            # No read loop runs, so nothing would ever arrive on the queue.
+            raise ConnectionError("client not connected")
         if self._disconnected and self._notifications.empty():
             # Do not rely only on the sentinel: it can be lost if a waiter
             # is cancelled as its ``get()`` completes (py3.11 ``wait_for``).

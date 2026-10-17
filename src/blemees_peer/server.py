@@ -21,7 +21,13 @@ from blemees_peer.errors import (
     PARSE_ERROR,
     PeerError,
 )
-from blemees_peer.framing import MAX_LINE_BYTES, LineTooLongError, read_line
+from blemees_peer.framing import (
+    MAX_LINE_BYTES,
+    LineTooLongError,
+    is_response,
+    is_valid_id,
+    read_line,
+)
 from blemees_peer.persistence import Persistence
 from blemees_peer.router import Router
 
@@ -194,6 +200,15 @@ class Server:
         method = request.get("method")
         params = request.get("params") or {}
 
+        if is_response(request):
+            # Never answer a response, not even with an error: two peers
+            # could then trade errors forever.
+            log.warning("dropping unexpected response object (id %r)", request_id)
+            return
+        if not is_valid_id(request_id):
+            # Do not echo an id of the wrong type (object, array, bool).
+            await conn.send_error(None, INVALID_REQUEST, "id must be a string, number or null")
+            return
         # A message that fails these two checks is not a valid notification,
         # so it gets an error even without an id (then "id": null).
         if request.get("jsonrpc") != "2.0":

@@ -442,6 +442,9 @@ not a goal of `blemees-peerd`.
 | Connection lost mid-session          | Queued DMs replay on reconnect; topic subscriptions drop and must be re-issued |
 | Line over 4 MiB (frame limit)        | Line discarded; returns `-32700` with `"id": null`; connection stays open. A response that would exceed the limit is replaced by a `-32603` error with the same id |
 | Line that is not valid JSON or not a JSON object | Returns `-32700` (invalid JSON) or `-32600` (not an object) with `"id": null`; connection stays open |
+| Message with no `id` that is not a valid notification (e.g. no string `method`) | Returns `-32600` with `"id": null`. A response object (`result` or `error`, no `method`) gets no reply, with or without an `id` |
+| Request `id` that is not a string, number or null (object, array, `true`/`false`) | Returns `-32600` with `"id": null`; the id is not echoed |
+| Socket accepts but `peer.hello` gets no reply | MCP sidecar gives up after 5 s, closes the connection and continues offline, as when `blemees-peerd` is not running |
 | `send`/`publish` body over 4 MiB − 64 KiB | Returns `-32602 message too large` (`data.max_body_bytes`); nothing persisted or delivered |
 
 ## 9. Agent integration
