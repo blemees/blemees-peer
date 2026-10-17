@@ -183,6 +183,8 @@ class McpServer:
         self.inbox: deque[dict[str, Any]] = deque(maxlen=INBOX_MAXLEN)
         self.subscribed_resources: set[str] = set()
         self._inbox_event = asyncio.Event()
+        # Set once the forwarder stops: no more notifications will arrive.
+        self._peer_gone = False
         self._initialized = False
         self._register_handlers()
 
@@ -191,7 +193,11 @@ class McpServer:
     # ------------------------------------------------------------------
 
     async def run(self) -> int:
-        """Run the sidecar until stdin closes or blemees-peerd disconnects."""
+        """Run the sidecar until stdin closes.
+
+        If blemees-peerd is unreachable or disconnects, the sidecar keeps
+        serving MCP and the peer tools return errors.
+        """
         try:
             await self.peer.connect()
         except (FileNotFoundError, ConnectionRefusedError) as e:
@@ -203,7 +209,7 @@ class McpServer:
         try:
             hello = await self.peer.hello(self.sid, self.home)
             log.info("hello ok: %s", hello)
-        except (RemoteError, RuntimeError) as e:
+        except (RemoteError, RuntimeError, ConnectionError) as e:
             log.error("hello failed: %s", e)
 
         if self.initial_alias:
@@ -211,7 +217,7 @@ class McpServer:
                 await self.peer.set_alias(self.initial_alias)
                 self.current_alias = self.initial_alias
                 log.info("claimed alias %r at startup", self.initial_alias)
-            except (RemoteError, RuntimeError) as e:
+            except (RemoteError, RuntimeError, ConnectionError) as e:
                 # Most likely cause: another live session in the same
                 # home already holds this alias. Don't crash; the
                 # session is still addressable by sid and the agent
@@ -237,8 +243,13 @@ class McpServer:
                 note = await self.peer.next_notification()
             except asyncio.CancelledError:
                 raise
+            except ConnectionError:
+                log.warning("blemees-peerd connection lost")
+                self._mark_peer_gone()
+                return
             except Exception:
                 log.exception("notification fetch failed")
+                self._mark_peer_gone()
                 return
             method = note.get("method")
             params = note.get("params") or {}
@@ -258,6 +269,11 @@ class McpServer:
                     "notifications/resources/updated",
                     {"uri": "peer://peers"},
                 )
+
+    def _mark_peer_gone(self) -> None:
+        """Wake ``peer_await`` callers: the inbox will never fill again."""
+        self._peer_gone = True
+        self._inbox_event.set()
 
     # ------------------------------------------------------------------
     # MCP method handlers
@@ -462,6 +478,10 @@ async def _tool_await(s: McpServer, args: dict[str, Any]) -> Any:
             if not s.inbox:
                 s._inbox_event.clear()
             return msg
+        # Check before clear(): a disconnect sets the event, and clear()
+        # would eat that wake-up and leave us waiting forever.
+        if s._peer_gone:
+            raise RemoteError(-32099, "blemees-peerd connection lost")
         s._inbox_event.clear()
         remaining = deadline - loop.time() if deadline is not None else None
         try:
@@ -710,7 +730,6 @@ class _OfflinePeerClient:
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
-        self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     async def connect(self) -> None:
         raise RemoteError(-32099, self.reason)
@@ -722,7 +741,8 @@ class _OfflinePeerClient:
         raise RemoteError(-32099, f"blemees-peerd unavailable: {self.reason}")
 
     async def next_notification(self, timeout: float | None = None) -> dict[str, Any]:
-        return await self._notifications.get()
+        # Fail like a dropped connection so ``peer_await`` returns an error.
+        raise ConnectionError(f"blemees-peerd unavailable: {self.reason}")
 
     def __getattr__(self, name: str) -> Callable[..., Awaitable[dict[str, Any]]]:
         async def stub(*args: Any, **kwargs: Any) -> dict[str, Any]:
