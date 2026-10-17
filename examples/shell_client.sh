@@ -42,7 +42,9 @@ case "$cmd" in
     {
       jq -nc --arg sid "$SID" --arg home "$HOME_PATH" \
         '{jsonrpc:"2.0", id:1, method:"peer.hello", params:{sid:$sid, home:$home}}'
-      sleep infinity
+      # Keep stdin open so socat stays connected. Not `sleep infinity`:
+      # BSD sleep (macOS) rejects it.
+      tail -f /dev/null
     } | socat - "UNIX-CONNECT:$SOCKET" | jq -c .
     ;;
   send)
