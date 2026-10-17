@@ -12,7 +12,8 @@ from typing import Any
 
 import pytest
 
-from blemees_peer.addressing import normalize_path
+from blemees_peer import mcp_server
+from blemees_peer.addressing import mint_sid, normalize_path
 from blemees_peer.client import RemoteError
 from blemees_peer.errors import SID_IN_USE
 from blemees_peer.framing import MAX_LINE_BYTES
@@ -669,6 +670,48 @@ async def test_invalid_json_stdin_line_gets_parse_error_with_null_id(mcp_proc) -
     assert "result" in await _recv_until_id(mcp_proc, 8)
 
 
+async def test_message_without_id_or_method_gets_invalid_request_with_null_id(
+    mcp_proc,
+) -> None:
+    for msg in ({"jsonrpc": "2.0", "params": {}}, {"jsonrpc": "2.0", "method": 42}):
+        await _send(mcp_proc, msg)
+        err = await _recv(mcp_proc)
+        assert err is not None
+        assert "id" in err and err["id"] is None, err
+        assert err["error"]["code"] == -32600, err
+    # A valid notification still gets no reply: the next message is the
+    # response to the ping.
+    await _send(mcp_proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    await _send(mcp_proc, {"jsonrpc": "2.0", "id": 9, "method": "ping", "params": {}})
+    reply = await _recv(mcp_proc)
+    assert reply is not None and reply.get("id") == 9 and "result" in reply, reply
+
+
+async def test_request_with_invalid_id_type_gets_invalid_request_with_null_id(
+    mcp_proc,
+) -> None:
+    # JSON-RPC 2.0 ids are a string, number or null: never echo another type.
+    for bad_id in ({"a": 1}, [1], True):
+        await _send(mcp_proc, {"jsonrpc": "2.0", "id": bad_id, "method": "ping", "params": {}})
+        err = await _recv(mcp_proc)
+        assert err is not None
+        assert "id" in err and err["id"] is None, (bad_id, err)
+        assert err["error"]["code"] == -32600, (bad_id, err)
+
+
+async def test_response_object_gets_no_reply(mcp_proc) -> None:
+    # Replying to a response could start an error loop with the host.
+    for msg in (
+        {"jsonrpc": "2.0", "result": 1},
+        {"jsonrpc": "2.0", "error": {"code": -32600, "message": "x"}},
+        {"jsonrpc": "2.0", "id": 5, "result": {}},
+    ):
+        await _send(mcp_proc, msg)
+    await _send(mcp_proc, {"jsonrpc": "2.0", "id": 9, "method": "ping", "params": {}})
+    reply = await _recv(mcp_proc)
+    assert reply is not None and reply.get("id") == 9 and "result" in reply, reply
+
+
 # --- peer_inbox / peer_await over MCP --------------------------------------
 
 
@@ -860,3 +903,45 @@ async def test_failed_sid_in_use_retry_goes_offline(tmp_socket_path, retry) -> N
         server.close()
         await server.wait_closed()
     assert len(hellos) == (1 if retry == "connect_fails" else 2)
+
+
+@pytest.mark.parametrize("silent_hello", ["first", "retry"])
+async def test_hello_without_reply_goes_offline(tmp_socket_path, monkeypatch, silent_hello) -> None:
+    """If peer.hello gets no reply, the sidecar must go offline, not hang before serving MCP."""
+    monkeypatch.setattr(mcp_server, "HELLO_TIMEOUT_S", 0.2)
+    hellos: list[str] = []
+    closed = asyncio.Event()
+
+    async def silent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Stand-in for blemees-peerd: accept, then never answer the hello
+        # ("retry": reject the first hello with sid_in_use, then go silent).
+        line = await reader.readline()
+        if line:
+            request = json.loads(line)
+            hellos.append(request["params"]["sid"])
+            if silent_hello == "retry" and len(hellos) == 1:
+                error = {"code": SID_IN_USE, "message": "sid already in use"}
+                response = {"jsonrpc": "2.0", "id": request["id"], "error": error}
+                writer.write((json.dumps(response) + "\n").encode())
+                await writer.drain()
+            else:
+                await reader.read()
+                closed.set()
+        writer.close()
+
+    server = await asyncio.start_unix_server(silent, path=str(tmp_socket_path))
+    s = McpServer(tmp_socket_path, "/tmp/peer-test-silent-hello", mint_sid())
+
+    async def serve() -> None:
+        # MCP serving starts offline, with the half-open connection closed.
+        assert isinstance(s.peer, _OfflinePeerClient)
+        await asyncio.wait_for(closed.wait(), timeout=2.0)
+
+    monkeypatch.setattr(s.rpc, "serve", serve)
+    try:
+        assert await asyncio.wait_for(s.run(), timeout=5.0) == 0
+    finally:
+        await s.peer.close()
+        server.close()
+        await server.wait_closed()
+    assert len(hellos) == (1 if silent_hello == "first" else 2)

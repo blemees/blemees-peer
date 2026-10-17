@@ -110,6 +110,13 @@ async def test_call_fails_fast_when_write_fails(dying_daemon, tmp_socket_path, m
         await client.close()
 
 
+async def test_next_notification_raises_when_never_connected(tmp_socket_path) -> None:
+    client = PeerClient(tmp_socket_path)
+    for timeout in (None, 30.0):
+        with pytest.raises(ConnectionError):
+            await asyncio.wait_for(client.next_notification(timeout=timeout), timeout=PROMPT)
+
+
 async def test_next_notification_raises_when_disconnected_and_queue_empty(
     dying_daemon, tmp_socket_path
 ) -> None:

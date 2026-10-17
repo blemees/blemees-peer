@@ -439,6 +439,97 @@ async def test_failed_notification_gets_no_response(peerd_server, tmp_socket_pat
             await writer.wait_closed()
 
 
+async def test_invalid_request_without_id_gets_error_with_null_id(
+    peerd_server, tmp_socket_path
+) -> None:
+    reader, writer = await asyncio.open_unix_connection(str(tmp_socket_path), limit=MAX_LINE_BYTES)
+
+    async def recv() -> dict:
+        line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=5.0)
+        return json.loads(line)
+
+    try:
+        # No "id", but not a valid notification either: JSON-RPC 2.0 wants
+        # an Invalid Request error with "id": null.
+        cases = [
+            {"jsonrpc": "1.0", "method": "peer.list_peers", "params": {}},
+            {"method": "peer.list_peers", "params": {}},
+            {"jsonrpc": "2.0", "params": {}},
+            {"jsonrpc": "2.0", "method": 42, "params": {}},
+        ]
+        for case in cases:
+            writer.write((json.dumps(case) + "\n").encode())
+            await writer.drain()
+            msg = await recv()
+            assert "id" in msg and msg["id"] is None, (case, msg)
+            assert msg["error"]["code"] == -32600, (case, msg)
+        # A valid notification (bad params) still gets no reply: the next
+        # line is the response to the request with an id.
+        note = {"jsonrpc": "2.0", "method": "peer.set_alias", "params": {"alias": 1}}
+        req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "peer.hello",
+            "params": {"sid": mint_sid(), "home": "/tmp/peer-test-invalid-note"},
+        }
+        writer.write((json.dumps(note) + "\n" + json.dumps(req) + "\n").encode())
+        await writer.drain()
+        msg = await recv()
+        assert msg.get("id") == 1 and "result" in msg, msg
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
+async def test_request_with_invalid_id_type_gets_error_with_null_id(
+    peerd_server, tmp_socket_path
+) -> None:
+    reader, writer = await asyncio.open_unix_connection(str(tmp_socket_path), limit=MAX_LINE_BYTES)
+    try:
+        # JSON-RPC 2.0 ids are a string, number or null: never echo another type.
+        for bad_id in ({"a": 1}, [1], True):
+            req = {"jsonrpc": "2.0", "id": bad_id, "method": "peer.list_peers", "params": {}}
+            writer.write((json.dumps(req) + "\n").encode())
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=5.0)
+            msg = json.loads(line)
+            assert "id" in msg and msg["id"] is None, (bad_id, msg)
+            assert msg["error"]["code"] == -32600, (bad_id, msg)
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
+async def test_response_object_gets_no_reply(peerd_server, tmp_socket_path) -> None:
+    reader, writer = await asyncio.open_unix_connection(str(tmp_socket_path), limit=MAX_LINE_BYTES)
+    try:
+        # Replying to a response could start an error loop between two peers.
+        responses = [
+            {"jsonrpc": "2.0", "result": 1},
+            {"jsonrpc": "2.0", "error": {"code": -32600, "message": "x"}},
+            {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "x"}},
+            {"jsonrpc": "2.0", "id": 5, "result": {}},
+        ]
+        req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "peer.hello",
+            "params": {"sid": mint_sid(), "home": "/tmp/peer-test-response-object"},
+        }
+        lines = [json.dumps(m) for m in [*responses, req]]
+        writer.write(("\n".join(lines) + "\n").encode())
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=5.0)
+        msg = json.loads(line)
+        assert msg.get("id") == 1 and "result" in msg, msg
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
 async def test_client_logs_error_with_null_id(client_factory, caplog) -> None:
     client = await client_factory()
     assert client._writer is not None

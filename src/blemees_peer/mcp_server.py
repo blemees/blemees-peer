@@ -28,12 +28,21 @@ from blemees_peer._version import __version__
 from blemees_peer.addressing import is_normalized_path, mint_sid, normalize_path
 from blemees_peer.client import PeerClient, RemoteError
 from blemees_peer.errors import SID_IN_USE
-from blemees_peer.framing import MAX_LINE_BYTES, LineTooLongError, read_line
+from blemees_peer.framing import (
+    MAX_LINE_BYTES,
+    LineTooLongError,
+    is_response,
+    is_valid_id,
+    read_line,
+)
 
 log = logging.getLogger("blemees-peer-mcp")
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 INBOX_MAXLEN = 1000
+# Bound on the startup peer.hello: whatever listens at the socket may accept
+# the connection and never reply. The sidecar then goes offline.
+HELLO_TIMEOUT_S = 5.0
 
 
 class StdioJsonRpc:
@@ -91,8 +100,19 @@ class StdioJsonRpc:
         params = msg.get("params") or {}
         request_id = msg.get("id")
 
+        if is_response(msg):
+            # Never answer a response, not even with an error: the host and
+            # the sidecar could then trade errors forever.
+            log.warning("dropping unexpected response object (id %r)", request_id)
+            return
+        if not is_valid_id(request_id):
+            # Do not echo an id of the wrong type (object, array, bool).
+            await self._write_error(None, -32600, "id must be a string, number or null")
+            return
         if not isinstance(method, str):
-            await self._send_error(request_id, -32600, "method must be a string")
+            # Not a valid notification, so it gets an error even without an
+            # id (then "id": null).
+            await self._write_error(request_id, -32600, "method must be a string")
             return
         if not isinstance(params, dict):
             await self._send_error(request_id, -32602, "params must be an object")
@@ -209,7 +229,7 @@ class McpServer:
 
         try:
             try:
-                hello = await self.peer.hello(self.sid, self.home)
+                hello = await self._hello(self.sid)
             except RemoteError as e:
                 if e.code != SID_IN_USE:
                     raise
@@ -223,7 +243,7 @@ class McpServer:
                 self.peer = PeerClient(self.socket_path)
                 try:
                     await self.peer.connect()
-                    hello = await self.peer.hello(new_sid, self.home)
+                    hello = await self._hello(new_sid)
                 except (RemoteError, RuntimeError, OSError) as retry_error:
                     # Go offline, as when the first connect() fails. A client
                     # without a session gives unclear tool errors, and one that
@@ -261,6 +281,18 @@ class McpServer:
             with contextlib.suppress(Exception):
                 await self.peer.close()
         return 0
+
+    async def _hello(self, sid: str) -> dict[str, Any]:
+        """``peer.hello`` bounded by ``HELLO_TIMEOUT_S``; on timeout, go offline."""
+        try:
+            return await asyncio.wait_for(self.peer.hello(sid, self.home), HELLO_TIMEOUT_S)
+        except TimeoutError:
+            # Close the half-open connection, as when connect() fails.
+            with contextlib.suppress(Exception):
+                await self.peer.close()
+            reason = f"no reply to peer.hello in {HELLO_TIMEOUT_S}s"
+            self.peer = _OfflinePeerClient(reason)  # type: ignore[assignment]
+            raise TimeoutError(reason) from None
 
     async def _forward_notifications(self) -> None:
         """Pull notifications from the peer client and stash them in the inbox."""
@@ -752,8 +784,9 @@ class _OfflinePeerClient:
 
     Every method raises ``RemoteError`` so the host sees a clear
     "blemees-peerd unavailable" message rather than the sidecar crashing.
-    Replaces the real client after ``peer.connect()`` failed, or after the
-    ``sid_in_use`` retry in ``McpServer.run()`` failed.
+    Replaces the real client after ``peer.connect()`` failed, after
+    ``peer.hello`` got no reply in time, or after the ``sid_in_use`` retry
+    in ``McpServer.run()`` failed.
     """
 
     def __init__(self, reason: str) -> None:
