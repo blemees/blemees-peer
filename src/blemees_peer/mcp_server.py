@@ -201,7 +201,7 @@ class McpServer:
         """
         try:
             await self.peer.connect()
-        except (FileNotFoundError, ConnectionRefusedError) as e:
+        except OSError as e:
             log.error("could not connect to blemees-peerd at %s: %s", self.socket_path, e)
             # Keep MCP serving so the host gets a useful error rather than
             # a sidecar that crashes immediately. Tools will return errors.
@@ -221,8 +221,18 @@ class McpServer:
                 with contextlib.suppress(Exception):
                     await self.peer.close()
                 self.peer = PeerClient(self.socket_path)
-                await self.peer.connect()
-                hello = await self.peer.hello(new_sid, self.home)
+                try:
+                    await self.peer.connect()
+                    hello = await self.peer.hello(new_sid, self.home)
+                except (RemoteError, RuntimeError, OSError) as retry_error:
+                    # Go offline, as when the first connect() fails. A client
+                    # without a session gives unclear tool errors, and one that
+                    # never connected would make peer_await hang.
+                    with contextlib.suppress(Exception):
+                        await self.peer.close()
+                    reason = f"hello retry failed: {retry_error}"
+                    self.peer = _OfflinePeerClient(reason)  # type: ignore[assignment]
+                    raise
                 self.sid = new_sid
             log.info("hello ok: %s", hello)
         except (RemoteError, RuntimeError, OSError) as e:
@@ -742,7 +752,8 @@ class _OfflinePeerClient:
 
     Every method raises ``RemoteError`` so the host sees a clear
     "blemees-peerd unavailable" message rather than the sidecar crashing.
-    Replaces the real client only after ``peer.connect()`` failed.
+    Replaces the real client after ``peer.connect()`` failed, or after the
+    ``sid_in_use`` retry in ``McpServer.run()`` failed.
     """
 
     def __init__(self, reason: str) -> None:

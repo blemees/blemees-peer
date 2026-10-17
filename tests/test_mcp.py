@@ -13,9 +13,12 @@ from typing import Any
 import pytest
 
 from blemees_peer.addressing import normalize_path
+from blemees_peer.client import RemoteError
+from blemees_peer.errors import SID_IN_USE
 from blemees_peer.framing import MAX_LINE_BYTES
 from blemees_peer.mcp_server import (
     McpServer,
+    _OfflinePeerClient,
     _tool_await,
     resolve_alias_at_startup,
     resolve_home_at_startup,
@@ -142,6 +145,21 @@ async def test_peer_await_timeout_is_total_not_per_wake() -> None:
     await asyncio.sleep(0.01)
     assert not waiter.done()
     assert await asyncio.wait_for(waiter, timeout=1.0) == {"timeout": True}
+
+
+async def test_peer_await_started_before_forwarder_is_woken_when_offline() -> None:
+    """A peer_await that starts before the forwarder runs must not miss the wake-up."""
+    s = _offline_server()
+    s.peer = _OfflinePeerClient("test")  # type: ignore[assignment]
+    waiter = asyncio.create_task(_tool_await(s, {}))
+    await asyncio.sleep(0.01)
+    assert not waiter.done()
+    await s._forward_notifications()
+    with pytest.raises(RemoteError):
+        await asyncio.wait_for(waiter, timeout=1.0)
+    # A later call fails at once.
+    with pytest.raises(RemoteError):
+        await asyncio.wait_for(_tool_await(s, {}), timeout=1.0)
 
 
 # --- subprocess plumbing ---------------------------------------------------
@@ -732,3 +750,113 @@ async def test_peer_inbox_returns_message_via_tool_call(mcp_proc, tmp_socket_pat
         assert out == {"messages": []}
     finally:
         await sender.close()
+
+
+# --- no usable blemees-peerd (#15, #19) --------------------------------------
+
+
+async def _spawn_sidecar(socket_path: Path, home: str, *args: str) -> asyncio.subprocess.Process:
+    env = {k: v for k, v in os.environ.items() if k != "BLEMEES_AGENT_ALIAS"}
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "blemees_peer.mcp",
+        "--socket",
+        str(socket_path),
+        "--home",
+        home,
+        "--log-level",
+        "warning",
+        *args,
+        env=env,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+
+async def _stop_sidecar(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is None:
+        if proc.stdin is not None:
+            proc.stdin.close()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+
+
+async def _call_tool_error(
+    proc: asyncio.subprocess.Process,
+    request_id: int,
+    name: str,
+    arguments: dict[str, Any],
+) -> str:
+    """Call a tool that must fail at once; return its error text."""
+    await _send(
+        proc,
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+    )
+    try:
+        resp = await asyncio.wait_for(_recv_until_id(proc, request_id), timeout=5.0)
+    except TimeoutError:
+        pytest.fail(f"{name} gave no response in 5s")
+    assert resp["result"]["isError"] is True, resp
+    return resp["result"]["content"][0]["text"]
+
+
+@pytest.mark.parametrize("socket_kind", ["missing", "not_a_socket"])
+async def test_peer_await_errors_when_peerd_absent(tmp_socket_path, socket_kind) -> None:
+    """With no blemees-peerd at startup, peer_await without a timeout must fail, not hang."""
+    if socket_kind == "not_a_socket":
+        tmp_socket_path.write_text("")
+    proc = await _spawn_sidecar(tmp_socket_path, "/tmp/peer-test-offline")
+    try:
+        # Do not wait for the initialize response: peer_await goes out
+        # while the sidecar still starts up.
+        await _send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        assert "blemees-peerd" in await _call_tool_error(proc, 2, "peer_await", {})
+        text = await _call_tool_error(proc, 3, "peer_list_peers", {})
+        assert "blemees-peerd unavailable" in text
+    finally:
+        await _stop_sidecar(proc)
+
+
+@pytest.mark.parametrize("retry", ["connect_fails", "hello_rejected"])
+async def test_failed_sid_in_use_retry_goes_offline(tmp_socket_path, retry) -> None:
+    """If the hello retry after sid_in_use fails, the sidecar must be offline."""
+    hellos: list[str] = []
+
+    async def reject_hello(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Stand-in for blemees-peerd: reject every hello with sid_in_use.
+        line = await reader.readline()
+        if line:
+            request = json.loads(line)
+            hellos.append(request["params"]["sid"])
+            if retry == "connect_fails":
+                # Stop listening first, so the retry cannot connect.
+                server.close()
+                tmp_socket_path.unlink(missing_ok=True)
+            error = {"code": SID_IN_USE, "message": "sid already in use"}
+            response = {"jsonrpc": "2.0", "id": request["id"], "error": error}
+            writer.write((json.dumps(response) + "\n").encode())
+            await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_unix_server(reject_hello, path=str(tmp_socket_path))
+    proc = await _spawn_sidecar(tmp_socket_path, "/tmp/peer-test-retry-fails")
+    try:
+        await _init(proc)
+        assert "blemees-peerd" in await _call_tool_error(proc, 2, "peer_await", {})
+        text = await _call_tool_error(proc, 3, "peer_list_peers", {})
+        assert "blemees-peerd unavailable" in text
+    finally:
+        await _stop_sidecar(proc)
+        server.close()
+        await server.wait_closed()
+    assert len(hellos) == (1 if retry == "connect_fails" else 2)
