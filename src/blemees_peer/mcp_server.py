@@ -178,7 +178,11 @@ class McpServer:
     # ------------------------------------------------------------------
 
     async def run(self) -> int:
-        """Run the sidecar until stdin closes or blemees-peerd disconnects."""
+        """Run the sidecar until stdin closes.
+
+        If blemees-peerd is unreachable or disconnects, the sidecar keeps
+        serving MCP and the peer tools return errors.
+        """
         try:
             await self.peer.connect()
         except (FileNotFoundError, ConnectionRefusedError) as e:
@@ -714,7 +718,6 @@ class _OfflinePeerClient:
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
-        self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     async def connect(self) -> None:
         raise RemoteError(-32099, self.reason)
@@ -726,7 +729,8 @@ class _OfflinePeerClient:
         raise RemoteError(-32099, f"blemees-peerd unavailable: {self.reason}")
 
     async def next_notification(self, timeout: float | None = None) -> dict[str, Any]:
-        return await self._notifications.get()
+        # Fail like a dropped connection so ``peer_await`` returns an error.
+        raise ConnectionError(f"blemees-peerd unavailable: {self.reason}")
 
     def __getattr__(self, name: str) -> Callable[..., Awaitable[dict[str, Any]]]:
         async def stub(*args: Any, **kwargs: Any) -> dict[str, Any]:

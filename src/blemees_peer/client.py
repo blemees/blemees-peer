@@ -269,6 +269,10 @@ class PeerClient:
         notification queued, and ``ConnectionError`` once the connection
         to blemees-peerd is gone and every earlier notification was read.
         """
+        if self._disconnected and self._notifications.empty():
+            # Do not rely only on the sentinel: it can be lost if a waiter
+            # is cancelled as its ``get()`` completes (py3.11 ``wait_for``).
+            raise ConnectionError(_CLOSED_MESSAGE)
         if timeout is None:
             note = await self._notifications.get()
         else:

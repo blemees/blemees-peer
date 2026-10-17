@@ -12,7 +12,7 @@ import pytest_asyncio
 
 from blemees_peer.addressing import mint_sid
 from blemees_peer.client import PeerClient
-from blemees_peer.mcp_server import McpServer
+from blemees_peer.mcp_server import McpServer, _OfflinePeerClient
 
 # Short bound: before the fix these awaits hang forever.
 PROMPT = 2.0
@@ -92,6 +92,40 @@ async def test_calls_and_notifications_fail_fast_after_daemon_drops(
         await client.close()
 
 
+async def test_call_fails_fast_when_write_fails(dying_daemon, tmp_socket_path, monkeypatch) -> None:
+    client = PeerClient(tmp_socket_path)
+    await client.connect()
+    try:
+
+        async def broken_drain() -> None:
+            raise BrokenPipeError("broken pipe")
+
+        assert client._writer is not None
+        monkeypatch.setattr(client._writer, "drain", broken_drain)
+        with pytest.raises(ConnectionError, match="broken pipe"):
+            await asyncio.wait_for(client.list_peers(), timeout=PROMPT)
+        assert client._pending == {}
+    finally:
+        await client.close()
+
+
+async def test_next_notification_raises_when_disconnected_and_queue_empty(
+    dying_daemon, tmp_socket_path
+) -> None:
+    client = PeerClient(tmp_socket_path)
+    await client.connect()
+    try:
+        with contextlib.suppress(ConnectionError):
+            await asyncio.wait_for(client.list_peers(), timeout=PROMPT)
+        await _wait_read_loop_done(client)
+        # Simulate a lost sentinel (py3.11 ``wait_for`` can drop a result).
+        client._notifications.get_nowait()
+        with pytest.raises(ConnectionError):
+            await asyncio.wait_for(client.next_notification(), timeout=PROMPT)
+    finally:
+        await client.close()
+
+
 async def test_blocked_notification_waiter_wakes_when_daemon_drops(
     dying_daemon, tmp_socket_path
 ) -> None:
@@ -160,3 +194,23 @@ async def test_mcp_peer_await_returns_error_after_daemon_drops(
             assert "connection lost" in result["content"][0]["text"]
     finally:
         await mcp.peer.close()
+
+
+async def test_mcp_peer_await_returns_error_when_daemon_offline(tmp_socket_path) -> None:
+    mcp = McpServer(tmp_socket_path, home="/tmp/peer-test-A", sid=mint_sid())
+    # What ``run()`` does when ``peer.connect()`` fails at startup.
+    mcp.peer = _OfflinePeerClient("no socket")  # type: ignore[assignment]
+    forwarder = asyncio.create_task(mcp._forward_notifications())
+    await asyncio.wait_for(forwarder, timeout=PROMPT)
+
+    result = await asyncio.wait_for(
+        mcp._h_tools_call({"name": "peer_await", "arguments": {}}), timeout=PROMPT
+    )
+    assert result["isError"] is True
+    assert "connection lost" in result["content"][0]["text"]
+
+    # Other tools still report the startup failure.
+    call = {"name": "peer_send", "arguments": {"to": "home:/tmp/x", "body": "hi"}}
+    result = await asyncio.wait_for(mcp._h_tools_call(call), timeout=PROMPT)
+    assert result["isError"] is True
+    assert "blemees-peerd unavailable: no socket" in result["content"][0]["text"]
