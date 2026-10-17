@@ -22,6 +22,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from blemees_peer.errors import INVALID_PARAMS
+from blemees_peer.framing import MAX_LINE_BYTES, LineTooLongError, read_line
+
 log = logging.getLogger("blemees-blemees-peerd.client")
 
 
@@ -51,7 +54,9 @@ class PeerClient:
     async def connect(self) -> None:
         if self._writer is not None:
             return
-        self._reader, self._writer = await asyncio.open_unix_connection(str(self.socket_path))
+        self._reader, self._writer = await asyncio.open_unix_connection(
+            str(self.socket_path), limit=MAX_LINE_BYTES
+        )
         self._read_task = asyncio.create_task(self._read_loop(), name="peer-client-read")
 
     async def close(self) -> None:
@@ -91,10 +96,14 @@ class PeerClient:
         self._next_id += 1
         rid = self._next_id
         fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
-        self._pending[rid] = fut
         message = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
         line = json.dumps(message, separators=(",", ":"), ensure_ascii=False) + "\n"
-        self._writer.write(line.encode("utf-8"))
+        encoded = line.encode("utf-8")
+        # peerd would discard the line and reply without an id; fail here instead.
+        if len(encoded) > MAX_LINE_BYTES:
+            raise RemoteError(INVALID_PARAMS, "request exceeds size limit")
+        self._pending[rid] = fut
+        self._writer.write(encoded)
         await self._writer.drain()
         return await fut
 
@@ -103,9 +112,12 @@ class PeerClient:
         try:
             while True:
                 try:
-                    line = await self._reader.readuntil(b"\n")
+                    line = await read_line(self._reader)
                 except (asyncio.IncompleteReadError, ConnectionResetError):
                     return
+                except LineTooLongError:
+                    log.warning("discarded line from blemees-peerd: exceeds size limit")
+                    continue
                 text = line.decode("utf-8", errors="replace").strip()
                 if not text:
                     continue

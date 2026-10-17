@@ -14,6 +14,7 @@ synchronous.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -33,6 +34,7 @@ from blemees_peer.errors import (
     SID_IN_USE,
     PeerError,
 )
+from blemees_peer.framing import MAX_BODY_BYTES
 from blemees_peer.messages import Message, mint_message_id, now_ts
 from blemees_peer.persistence import Persistence
 
@@ -266,6 +268,7 @@ class Router:
             raise PeerError(INVALID_PARAMS, str(e)) from None
         if not isinstance(addr, HomeAddress):
             raise PeerError(INVALID_PARAMS, "peer.send target must be a home: address")
+        _check_body_size(body)
 
         msg = Message(
             message_id=mint_message_id(),
@@ -334,6 +337,7 @@ class Router:
     ) -> dict[str, Any]:
         _require_hello(conn)
         topic = _validate_topic(topic)
+        _check_body_size(body)
         full_addr = f"topic:{topic}"
         msg = Message(
             message_id=mint_message_id(),
@@ -491,6 +495,13 @@ def _validate_topic(topic: str) -> str:
     if len(topic.encode("utf-8")) > 256:
         raise PeerError(INVALID_PARAMS, "topic name must be ≤ 256 bytes UTF-8")
     return topic
+
+
+def _check_body_size(body: Any) -> None:
+    # Measure the body as the wire encodes it (see connection._encode).
+    size = len(json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    if size > MAX_BODY_BYTES:
+        raise PeerError(INVALID_PARAMS, "message too large", {"max_body_bytes": MAX_BODY_BYTES})
 
 
 def _require_hello(conn: Connection) -> None:

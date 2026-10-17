@@ -16,6 +16,9 @@ import json
 import logging
 from typing import Any
 
+from blemees_peer.errors import INTERNAL_ERROR
+from blemees_peer.framing import MAX_LINE_BYTES
+
 log = logging.getLogger("blemees-peerd.connection")
 
 # Upper bound for each step of Connection.close(): draining the outbox, then
@@ -112,9 +115,30 @@ class Connection:
                 msg = await self.outbox.get()
                 if msg is None:
                     return
-                line = json.dumps(msg, separators=(",", ":"), ensure_ascii=False) + "\n"
+                data = _encode(msg)
+                if len(data) > MAX_LINE_BYTES:
+                    # The peer would discard this line. Turn a response into
+                    # an error so the caller does not wait forever; drop the rest.
+                    if "id" in msg and "result" in msg:
+                        log.warning(
+                            "response to %s exceeds size limit; sending error", self.peer_id
+                        )
+                        data = _encode(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": msg["id"],
+                                "error": {
+                                    "code": INTERNAL_ERROR,
+                                    "message": "response exceeds size limit",
+                                    "data": {"max_line_bytes": MAX_LINE_BYTES},
+                                },
+                            }
+                        )
+                    else:
+                        log.warning("dropped outbound line to %s: exceeds size limit", self.peer_id)
+                        continue
                 try:
-                    self.writer.write(line.encode("utf-8"))
+                    self.writer.write(data)
                     await self.writer.drain()
                 except (ConnectionResetError, BrokenPipeError):
                     self.closed = True
@@ -146,3 +170,7 @@ class Connection:
         # which never ends if the peer stops reading.
         with contextlib.suppress(Exception):
             await asyncio.wait_for(self.writer.wait_closed(), timeout=CLOSE_TIMEOUT_S)
+
+
+def _encode(msg: dict[str, Any]) -> bytes:
+    return (json.dumps(msg, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")

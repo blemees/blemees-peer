@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
+
 import pytest
 
+from blemees_peer.addressing import mint_sid
 from blemees_peer.client import PeerClient, RemoteError
+from blemees_peer.framing import MAX_BODY_BYTES, MAX_LINE_BYTES
 
 # --- hello / errors ---------------------------------------------------------
 
@@ -234,3 +240,99 @@ async def test_wire_observation_unwatch(client_factory) -> None:
             break
         seen.append(note["method"])
     assert "peer.wire_message" not in seen
+
+
+# --- line size limit (#2) ----------------------------------------------------
+
+
+async def test_dm_larger_than_64k_delivered(client_factory) -> None:
+    a = await client_factory(home="/tmp/peer-test-A")
+    b = await client_factory(home="/tmp/peer-test-B")
+    body = "x" * (100 * 1024)
+    res = await asyncio.wait_for(a.send(to="home:/tmp/peer-test-B", body=body), timeout=5.0)
+    assert res["delivered"] == 1
+    note = await b.next_notification(timeout=5.0)
+    assert note["method"] == "peer.message"
+    assert note["params"]["body"] == body
+
+
+async def test_oversize_line_keeps_connection_open(peerd_server, tmp_socket_path) -> None:
+    reader, writer = await asyncio.open_unix_connection(str(tmp_socket_path), limit=MAX_LINE_BYTES)
+
+    async def call(rid: int, method: str, params: dict) -> dict:
+        req = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
+        writer.write((json.dumps(req) + "\n").encode())
+        await writer.drain()
+        while True:
+            line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=5.0)
+            msg = json.loads(line)
+            if msg.get("id") == rid:
+                return msg
+
+    try:
+        hello = await call(1, "peer.hello", {"sid": mint_sid(), "home": "/tmp/peer-test-big"})
+        assert "result" in hello
+        writer.write(b"x" * (MAX_LINE_BYTES + 1024) + b"\n")
+        await writer.drain()
+        # Same connection still answers requests after the oversize line.
+        resp = await call(2, "peer.list_peers", {})
+        assert "result" in resp
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
+async def test_history_too_large_for_one_line_returns_error(client_factory) -> None:
+    a = await client_factory(home="/tmp/peer-test-A")
+    body = "x" * (100 * 1024)
+    for _ in range(45):  # ~4.5 MiB in total
+        await a.publish("t", body)
+    with pytest.raises(RemoteError) as exc:
+        await asyncio.wait_for(a.history("topic:t", limit=100), timeout=5.0)
+    assert exc.value.code == -32603
+    # The connection still answers after the error.
+    res = await asyncio.wait_for(a.history("topic:t", limit=1), timeout=5.0)
+    assert len(res["messages"]) == 1
+
+
+async def test_dm_body_too_large_rejected_not_delivered(client_factory, peerd_server) -> None:
+    a = await client_factory(home="/tmp/peer-test-A")
+    b = await client_factory(home="/tmp/peer-test-B")
+    with pytest.raises(RemoteError) as exc:
+        await asyncio.wait_for(
+            a.send(to="home:/tmp/peer-test-B", body="x" * (MAX_LINE_BYTES - 200)), timeout=5.0
+        )
+    assert exc.value.code == -32602
+    assert exc.value.data == {"max_body_bytes": MAX_BODY_BYTES}
+    with pytest.raises(asyncio.TimeoutError):
+        await b.next_notification(timeout=0.5)
+    assert not peerd_server.persistence.dms.has_messages("home:/tmp/peer-test-B")
+
+    # A body right at the limit is still delivered.
+    body = "x" * (MAX_BODY_BYTES - 2)  # +2 for the JSON quotes
+    res = await asyncio.wait_for(a.send(to="home:/tmp/peer-test-B", body=body), timeout=5.0)
+    assert res["delivered"] == 1
+    note = await b.next_notification(timeout=5.0)
+    assert note["method"] == "peer.message"
+    assert note["params"]["body"] == body
+
+
+async def test_publish_body_too_large_rejected(client_factory) -> None:
+    a = await client_factory(home="/tmp/peer-test-A")
+    with pytest.raises(RemoteError) as exc:
+        await asyncio.wait_for(a.publish("t", "x" * MAX_BODY_BYTES), timeout=5.0)
+    assert exc.value.code == -32602
+    res = await asyncio.wait_for(a.history("topic:t"), timeout=5.0)
+    assert res["messages"] == []
+
+
+async def test_request_too_large_raises_and_connection_still_usable(client_factory) -> None:
+    a = await client_factory(home="/tmp/peer-test-A")
+    with pytest.raises(RemoteError) as exc:
+        await asyncio.wait_for(
+            a.send(to="home:/tmp/peer-test-B", body="x" * (MAX_LINE_BYTES + 10)), timeout=5.0
+        )
+    assert exc.value.code == -32602
+    res = await asyncio.wait_for(a.list_peers(), timeout=5.0)
+    assert "peers" in res
