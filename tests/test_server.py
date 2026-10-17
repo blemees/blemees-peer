@@ -398,11 +398,11 @@ async def test_failed_notification_gets_no_response(peerd_server, tmp_socket_pat
 async def test_client_logs_error_with_null_id(client_factory, caplog) -> None:
     client = await client_factory()
     assert client._writer is not None
-    with caplog.at_level(logging.WARNING, logger="blemees-blemees-peerd.client"):
+    with caplog.at_level(logging.WARNING, logger="blemees-peerd.client"):
         client._writer.write(b"{not json\n")
         await client._writer.drain()
         # A later call still resolves: the null-id error did not fail it.
         info = await client.list_peers()
     assert "peers" in info
-    client_logs = [r for r in caplog.records if r.name == "blemees-blemees-peerd.client"]
+    client_logs = [r for r in caplog.records if r.name == "blemees-peerd.client"]
     assert any("-32700" in r.getMessage() for r in client_logs)
