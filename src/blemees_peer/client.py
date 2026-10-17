@@ -25,7 +25,7 @@ from typing import Any
 from blemees_peer.errors import INVALID_PARAMS
 from blemees_peer.framing import MAX_LINE_BYTES, LineTooLongError, read_line
 
-log = logging.getLogger("blemees-blemees-peerd.client")
+log = logging.getLogger("blemees-peerd.client")
 
 
 class RemoteError(Exception):
