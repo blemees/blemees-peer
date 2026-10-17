@@ -27,6 +27,7 @@ from typing import Any
 from blemees_peer._version import __version__
 from blemees_peer.addressing import is_normalized_path, normalize_path
 from blemees_peer.client import PeerClient, RemoteError
+from blemees_peer.framing import MAX_LINE_BYTES, LineTooLongError, read_line
 
 log = logging.getLogger("blemees-peer-mcp")
 
@@ -56,16 +57,19 @@ class StdioJsonRpc:
 
     async def serve(self) -> None:
         loop = asyncio.get_running_loop()
-        reader = asyncio.StreamReader()
+        reader = asyncio.StreamReader(limit=MAX_LINE_BYTES)
         protocol = asyncio.StreamReaderProtocol(reader)
         await loop.connect_read_pipe(lambda: protocol, sys.stdin)
         self._stdin_reader = reader
 
         while True:
             try:
-                line = await reader.readuntil(b"\n")
+                line = await read_line(reader)
             except asyncio.IncompleteReadError:
                 return
+            except LineTooLongError:
+                await self._send_error(None, -32700, "line exceeds size limit")
+                continue
             text = line.decode("utf-8", errors="replace").strip()
             if not text:
                 continue

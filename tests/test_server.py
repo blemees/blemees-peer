@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
+
 import pytest
 
+from blemees_peer.addressing import mint_sid
 from blemees_peer.client import PeerClient, RemoteError
+from blemees_peer.server import MAX_LINE_BYTES
 
 # --- hello / errors ---------------------------------------------------------
 
@@ -234,3 +240,44 @@ async def test_wire_observation_unwatch(client_factory) -> None:
             break
         seen.append(note["method"])
     assert "peer.wire_message" not in seen
+
+
+# --- line size limit (#2) ----------------------------------------------------
+
+
+async def test_dm_larger_than_64k_delivered(client_factory) -> None:
+    a = await client_factory(home="/tmp/peer-test-A")
+    b = await client_factory(home="/tmp/peer-test-B")
+    body = "x" * (100 * 1024)
+    res = await asyncio.wait_for(a.send(to="home:/tmp/peer-test-B", body=body), timeout=5.0)
+    assert res["delivered"] == 1
+    note = await b.next_notification(timeout=5.0)
+    assert note["method"] == "peer.message"
+    assert note["params"]["body"] == body
+
+
+async def test_oversize_line_keeps_connection_open(peerd_server, tmp_socket_path) -> None:
+    reader, writer = await asyncio.open_unix_connection(str(tmp_socket_path), limit=MAX_LINE_BYTES)
+
+    async def call(rid: int, method: str, params: dict) -> dict:
+        req = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
+        writer.write((json.dumps(req) + "\n").encode())
+        await writer.drain()
+        while True:
+            line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=5.0)
+            msg = json.loads(line)
+            if msg.get("id") == rid:
+                return msg
+
+    try:
+        hello = await call(1, "peer.hello", {"sid": mint_sid(), "home": "/tmp/peer-test-big"})
+        assert "result" in hello
+        writer.write(b"x" * (MAX_LINE_BYTES + 1024) + b"\n")
+        await writer.drain()
+        # Same connection still answers requests after the oversize line.
+        resp = await call(2, "peer.list_peers", {})
+        assert "result" in resp
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()

@@ -21,13 +21,11 @@ from blemees_peer.errors import (
     PARSE_ERROR,
     PeerError,
 )
+from blemees_peer.framing import MAX_LINE_BYTES, LineTooLongError, read_line
 from blemees_peer.persistence import Persistence
 from blemees_peer.router import Router
 
 log = logging.getLogger("blemees-peerd.server")
-
-
-MAX_LINE_BYTES = 4 * 1024 * 1024  # 4 MiB; messages larger than this are rejected
 
 
 class Server:
@@ -77,7 +75,7 @@ class Server:
         self.persistence.load_all()
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         self._server = await asyncio.start_unix_server(
-            self._handle_connection, path=str(self.socket_path)
+            self._handle_connection, path=str(self.socket_path), limit=MAX_LINE_BYTES
         )
         os.chmod(self.socket_path, self.socket_mode)
         log.info("listening on %s", self.socket_path)
@@ -147,17 +145,17 @@ class Server:
         try:
             while True:
                 try:
-                    line = await reader.readuntil(b"\n")
+                    line = await read_line(reader)
                 except asyncio.IncompleteReadError as e:
                     if e.partial:
                         log.debug("client disconnected with partial line; discarding")
                     break
-                except asyncio.LimitOverrunError:
+                except LineTooLongError:
                     await self._send_error(conn, None, PARSE_ERROR, "line exceeds size limit")
-                    break
+                    continue
                 if len(line) > MAX_LINE_BYTES:
                     await self._send_error(conn, None, PARSE_ERROR, "line exceeds size limit")
-                    break
+                    continue
                 await self._dispatch_line(conn, line)
         except (ConnectionResetError, BrokenPipeError):
             pass

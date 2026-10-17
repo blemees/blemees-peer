@@ -445,3 +445,67 @@ async def test_resources_list_and_read(mcp_proc) -> None:
     contents = resp["result"]["contents"]
     assert contents[0]["uri"] == "peer://inbox"
     assert contents[0]["mimeType"] == "application/json"
+
+
+# --- line size limit (#2) ----------------------------------------------------
+
+
+async def test_tool_call_larger_than_64k(mcp_proc, peerd_server, tmp_socket_path) -> None:
+    from blemees_peer.client import PeerClient
+
+    recipient = PeerClient(tmp_socket_path)
+    await recipient.connect()
+    await recipient.hello("sess_BIGRBIGRBIGRBIGR", "/tmp/peer-test-big-rcpt")
+    body = "x" * (100 * 1024)
+    try:
+        await _send(mcp_proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        await _recv_until_id(mcp_proc, 1)
+        await _send(
+            mcp_proc,
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "peer_send",
+                    "arguments": {"to": "home:/tmp/peer-test-big-rcpt", "body": body},
+                },
+            },
+        )
+        resp = await _recv_until_id(mcp_proc, 2)
+        assert resp["result"]["isError"] is False
+        for _ in range(4):
+            note = await recipient.next_notification(timeout=5.0)
+            if note["method"] == "peer.message":
+                break
+        assert note["method"] == "peer.message"
+        assert note["params"]["body"] == body
+    finally:
+        await recipient.close()
+
+
+async def test_oversize_stdin_line_gets_parse_error_and_serve_continues(mcp_proc) -> None:
+    from blemees_peer.server import MAX_LINE_BYTES
+
+    assert mcp_proc.stdin is not None
+    mcp_proc.stdin.write(b"x" * (MAX_LINE_BYTES + 1024) + b"\n")
+    await mcp_proc.stdin.drain()
+    await _send(mcp_proc, {"jsonrpc": "2.0", "id": 7, "method": "ping", "params": {}})
+    seen: list[dict[str, Any]] = []
+    while True:
+        msg = await _recv(mcp_proc)
+        if msg is None:
+            pytest.fail("MCP sidecar closed stdout unexpectedly")
+        seen.append(msg)
+        if msg.get("id") == 7:
+            break
+    assert "result" in seen[-1]
+
+    # The sidecar drops id-less errors from the wire and logs them instead;
+    # accept either form of the -32700 reply.
+    mcp_proc.stdin.close()
+    await asyncio.wait_for(mcp_proc.wait(), timeout=5.0)
+    assert mcp_proc.stderr is not None
+    stderr = (await mcp_proc.stderr.read()).decode()
+    on_wire = any(m.get("error", {}).get("code") == -32700 for m in seen)
+    assert on_wire or ("-32700" in stderr and "line exceeds size limit" in stderr)

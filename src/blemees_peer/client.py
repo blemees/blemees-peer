@@ -22,6 +22,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from blemees_peer.framing import MAX_LINE_BYTES, LineTooLongError, read_line
+
 log = logging.getLogger("blemees-blemees-peerd.client")
 
 
@@ -51,7 +53,9 @@ class PeerClient:
     async def connect(self) -> None:
         if self._writer is not None:
             return
-        self._reader, self._writer = await asyncio.open_unix_connection(str(self.socket_path))
+        self._reader, self._writer = await asyncio.open_unix_connection(
+            str(self.socket_path), limit=MAX_LINE_BYTES
+        )
         self._read_task = asyncio.create_task(self._read_loop(), name="peer-client-read")
 
     async def close(self) -> None:
@@ -103,9 +107,12 @@ class PeerClient:
         try:
             while True:
                 try:
-                    line = await self._reader.readuntil(b"\n")
+                    line = await read_line(self._reader)
                 except (asyncio.IncompleteReadError, ConnectionResetError):
                     return
+                except LineTooLongError:
+                    log.warning("discarded line from blemees-peerd: exceeds size limit")
+                    continue
                 text = line.decode("utf-8", errors="replace").strip()
                 if not text:
                     continue
