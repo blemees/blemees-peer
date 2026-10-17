@@ -448,6 +448,60 @@ async def test_peer_send_via_tool_call(mcp_proc, peerd_server, tmp_socket_path) 
         await recipient.close()
 
 
+async def test_sid_in_use_retries_with_fresh_sid(peerd_server, tmp_socket_path) -> None:
+    """A stale holder of BLEMEES_AGENT_SID must not leave the sidecar without a session."""
+    from blemees_peer.addressing import is_valid_sid
+    from blemees_peer.client import PeerClient
+
+    taken = "sess_TAKENTAKENTAKEN1"
+    holder = PeerClient(tmp_socket_path)
+    await holder.connect()
+    await holder.hello(taken, "/tmp/peer-test-holder")
+    env = {k: v for k, v in os.environ.items() if k != "BLEMEES_AGENT_ALIAS"}
+    env["BLEMEES_AGENT_SID"] = taken
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "blemees_peer.mcp",
+        "--socket",
+        str(tmp_socket_path),
+        "--home",
+        "/tmp/peer-test-mcp-retry",
+        "--log-level",
+        "warning",
+        env=env,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        await _init(proc)
+        me = await _call_tool(proc, 2, "peer_whoami", {})
+        assert me["sid"] != taken and is_valid_sid(me["sid"])
+        assert me["address"] == f"home:/tmp/peer-test-mcp-retry#{me['sid']}"
+        res = await _call_tool(proc, 3, "peer_send", {"to": "home:/tmp/peer-test-holder"})
+        assert res["delivered"] == 1
+        note = await holder.next_notification(timeout=2.0)
+        for _ in range(3):
+            if note["method"] == "peer.message":
+                break
+            note = await holder.next_notification(timeout=2.0)
+        assert note["params"]["from"] == f"home:/tmp/peer-test-mcp-retry#{me['sid']}"
+    finally:
+        await holder.close()
+        if proc.returncode is None:
+            if proc.stdin is not None:
+                proc.stdin.close()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3.0)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+    assert proc.stderr is not None
+    stderr = (await proc.stderr.read()).decode()
+    assert taken in stderr and me["sid"] in stderr, stderr
+
+
 async def test_alias_claimed_from_env(peerd_server, tmp_socket_path) -> None:
     """The sidecar should auto-claim BLEMEES_AGENT_ALIAS after hello."""
     proc = await asyncio.create_subprocess_exec(

@@ -12,8 +12,26 @@
 
 set -euo pipefail
 
-SOCKET="${PEERD_SOCKET:-${XDG_RUNTIME_DIR:-/tmp}/blemees/peerd.sock}"
-HOME_PATH="${BLEMEES_AGENT_HOME:-$(python3 -c 'import os; print(os.path.realpath(os.getcwd()))')}"
+# Same order as default_socket_path() in src/blemees_peer/persistence.py.
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+  DEFAULT_SOCKET="$XDG_RUNTIME_DIR/blemees/peerd.sock"
+else
+  DEFAULT_SOCKET="/tmp/blemees-peerd-$(id -u).sock"
+fi
+SOCKET="${PEERD_SOCKET:-$DEFAULT_SOCKET}"
+
+# Same rules as normalize_path() in src/blemees_peer/addressing.py: resolve
+# symlinks, then rewrite a path at or under the home directory with "~".
+normalize_cwd() {
+  real="$(pwd -P)"
+  user_home="$(cd ~ 2>/dev/null && pwd -P)" || user_home="${HOME:-}"
+  case "$real" in
+    "$user_home") printf '~\n' ;;
+    "$user_home"/*) printf '~/%s\n' "${real#"$user_home"/}" ;;
+    *) printf '%s\n' "$real" ;;
+  esac
+}
+HOME_PATH="${BLEMEES_AGENT_HOME:-$(normalize_cwd)}"
 SID="${BLEMEES_AGENT_SID:-sess_$(python3 -c 'import secrets; print(secrets.token_urlsafe(12))')}"
 
 cmd="${1:-hello}"

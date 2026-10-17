@@ -163,6 +163,9 @@ class Server:
                 await self._dispatch_line(conn, line)
         except (ConnectionResetError, BrokenPipeError):
             pass
+        except _HelloFailedError:
+            # SPEC §8: the error is already queued; close() below flushes it.
+            pass
         except Exception:
             log.exception("connection handler crashed for %s", conn.peer_id)
         finally:
@@ -215,6 +218,8 @@ class Server:
             result = await handler(conn, params)
         except PeerError as e:
             await self._send_error(conn, request_id, e.code, e.message, e.data)
+            if method == "peer.hello" and not conn.hello_complete:
+                raise _HelloFailedError from None
             return
         except Exception:
             log.exception("handler %s crashed", method)
@@ -343,3 +348,7 @@ class Server:
 
 
 Handler = Callable[[Connection, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+class _HelloFailedError(Exception):
+    """A ``peer.hello`` was rejected: the server closes the connection."""

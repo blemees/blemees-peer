@@ -86,7 +86,7 @@ A session can claim a short, human-meaningful identity string
 - **Bound to the connection.** When the session disconnects the alias
   is released; another session may then claim it. Queued DMs
   addressed to the alias survive the gap and are delivered to whoever
-  next claims it (within retention).
+  next claims it (while they are still in the bounded queue, §7).
 - **Optional.** A session is always addressable by its `sid` whether
   or not it has an alias.
 
@@ -129,7 +129,10 @@ its identity at startup, with no help from `blemees-peerd`:
   `os.path.realpath(os.getcwd())` and normalize.
 - **sid** — if the env var `BLEMEES_AGENT_SID` is set and well-formed
   (matches `sess_` + 16 url-safe base64 chars), use it. Otherwise
-  mint a fresh sid via `secrets.token_urlsafe(12)`.
+  mint a fresh sid via `secrets.token_urlsafe(12)`. If `peer.hello`
+  then fails with `-32011 sid_in_use` (e.g. a stale session still
+  holds that sid), the MCP sidecar retries once on a new connection
+  with a freshly minted sid and logs a warning naming both sids.
 - **alias** *(optional)* — if the env var `BLEMEES_AGENT_ALIAS` is
   set and well-formed (matches the alias grammar in §2), the sidecar
   calls `peer.set_alias` once after `peer.hello` to claim it. A
@@ -220,7 +223,7 @@ is the count of currently-connected recipients. Undelivered DMs are
 queued under the addressed string; topic messages are not queued for
 absent subscribers. If `to` uses an alias and no session currently
 holds it, the message is queued under the alias address and delivered
-when a session next claims it (within retention).
+when a session next claims it (while it is still in the bounded queue, §7).
 
 ### `peer.publish`
 
@@ -268,7 +271,13 @@ Returns `{"topics": [{"name": "...", "subscribers": <int>, "last_message_at": <t
  "since": "<message_id>",        // optional
  "limit": 100}
 ```
-Returns `{"messages": [...]}` from persisted log.
+Returns `{"messages": [...]}`, oldest first:
+
+- For a `topic:` address, the messages in that topic's ring buffer (§7).
+- For a `home:` address, only the DMs still queued (undelivered) under
+  that exact address string. Delivered DMs are not kept: a DM is
+  removed from the queue when it is delivered, so it no longer shows
+  in history.
 
 ### `peer.watch`
 
@@ -358,10 +367,6 @@ send time.
 ```
 Emitted when any session sets, changes, or clears its alias.
 
-### `peer.subscription_lost`
-
-Emitted if `blemees-peerd` evicts a subscription (e.g. server shutdown grace).
-
 ### `peer.wire_message`
 
 ```json
@@ -414,7 +419,12 @@ not a goal of `blemees-peerd`.
 
 - Hash is `sha256(address)[:16]` so on-disk filenames don't leak paths
   to anyone reading `ls`.
-- Logs rotate weekly, keep 4 weeks, then deleted. Configurable.
+- Storage is bounded by the DM queue size and the topic ring buffer
+  size; each file is rewritten whole on every change. There is no
+  time-based rotation or retention in v0.1.
+- DMs are kept only until they are delivered: a delivered DM is removed
+  from its queue and is not stored anywhere else. So `peer.history` on
+  a `home:` address returns only undelivered DMs (§5).
 - Cold start: `blemees-peerd` rehydrates ring buffers and queue tails into
   memory at boot.
 
@@ -423,10 +433,10 @@ not a goal of `blemees-peerd`.
 | Situation                            | Behavior                                    |
 |--------------------------------------|---------------------------------------------|
 | `blemees-peerd` not running                  | Agent connect-refused; peer tools surface as unavailable, agent continues |
-| `peer.hello` with un-normalized home | Returns `-32602 invalid_params`, connection closed |
+| `peer.hello` with un-normalized home or malformed sid | Returns `-32602 invalid_params`, connection closed |
 | `peer.hello` with sid already live   | Returns `-32011 sid_in_use`, connection closed |
 | `set_alias` collision                | Returns `-32010 alias_taken`; caller's existing alias (if any) is unchanged |
-| Send to unknown DM recipient         | Returns `delivered: 0`; queued under that address; replayed on first hello matching it (within retention) |
+| Send to unknown DM recipient         | Returns `delivered: 0`; queued under that address; replayed on first hello matching it (while it is still in the bounded queue) |
 | Send to unclaimed alias              | Returns `delivered: 0`; queued under `home:<path>#<alias>`; delivered to whoever next claims that alias in that home |
 | Publish to topic with no subscribers | Returns `subscribers: 0`; message still persisted to ring buffer |
 | Connection lost mid-session          | Queued DMs replay on reconnect; topic subscriptions drop and must be re-issued |
@@ -485,8 +495,11 @@ harness. Nothing in `blemees-agentd` references `blemees-peerd` or this package.
 - End-to-end encryption between peers — `blemees-peerd` is a trusted broker
 - Per-host coordination of `sid` collision risk — sids are minted
   randomly with 96 bits of entropy, so practical collisions are
-  nil; `blemees-peerd` rejects duplicates at hello but does not gracefully
-  retry on the client side
+  nil; `blemees-peerd` rejects duplicates at hello and closes the
+  connection. The MCP sidecar retries once with a freshly minted sid
+  (§3); other clients do not retry
 - Backpressure beyond bounded queues / ring buffers
 - Replay across `blemees-peerd` restarts spanning a process crash mid-write
-  (durability is best-effort fsync-on-close-of-batch)
+  (each change is written to a temp file, fsynced, then atomically
+  renamed over the old file; the directory is not fsynced, so a crash
+  may lose the most recent change)

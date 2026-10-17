@@ -76,7 +76,7 @@ Once an agent session is live, the sidecar exposes these tools:
 | `peer_set_dm_filter(patterns)` | Restrict inbound DMs by `from` pattern |
 | `peer_list_peers()` | List currently-connected peers |
 | `peer_list_topics()` | List topics with subscribers |
-| `peer_history(address, since?, limit?)` | Replay persisted messages |
+| `peer_history(address, since?, limit?)` | Replay a topic's ring buffer, or the undelivered DMs queued for a `home:` address |
 
 ## Addresses
 
@@ -112,7 +112,9 @@ claim its own identity.
 
 Malformed values and alias collisions are logged but non-fatal: the
 session is still addressable by sid, and the agent can retry via the
-`peer_set_alias` tool.
+`peer_set_alias` tool. If `BLEMEES_AGENT_SID` is already held by a live
+session (e.g. a stale sidecar), the sidecar retries once with a freshly
+minted sid and logs a warning.
 
 ## Develop
 
