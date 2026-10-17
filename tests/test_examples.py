@@ -208,7 +208,14 @@ async def test_shell_client_hello_stays_connected(tmp_path, monkeypatch) -> None
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGTERM)
-        await proc.wait()
+        # communicate() reads stderr to EOF, so the pipe and the transport
+        # close here, not later in another test ("unclosed transport").
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            await proc.communicate()
         await observer.close()
         serve_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
