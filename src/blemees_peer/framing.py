@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any
 
 MAX_LINE_BYTES = 4 * 1024 * 1024  # 4 MiB; messages larger than this are rejected
@@ -12,8 +13,16 @@ MAX_BODY_BYTES = MAX_LINE_BYTES - 64 * 1024
 
 
 def is_valid_id(value: Any) -> bool:
-    """JSON-RPC 2.0 ids are a string, a number or null (a bool is not a number)."""
-    return value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool))
+    """JSON-RPC 2.0 ids are a string, a number or null.
+
+    A bool is not a number. NaN and Infinity are not JSON numbers: Python's
+    parser accepts them, but an echo of one would make the reply invalid JSON.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return value is None or isinstance(value, (str, int))
 
 
 def is_response(msg: dict[str, Any]) -> bool:

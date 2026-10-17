@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from typing import Any
 
 import pytest
 
@@ -482,18 +483,28 @@ async def test_invalid_request_without_id_gets_error_with_null_id(
             await writer.wait_closed()
 
 
+def _strict_json(line: bytes) -> Any:
+    """Parse *line* as strict JSON: NaN and Infinity are an error."""
+
+    def reject(name: str) -> None:
+        raise ValueError(f"non-JSON constant {name}")
+
+    return json.loads(line, parse_constant=reject)
+
+
 async def test_request_with_invalid_id_type_gets_error_with_null_id(
     peerd_server, tmp_socket_path
 ) -> None:
     reader, writer = await asyncio.open_unix_connection(str(tmp_socket_path), limit=MAX_LINE_BYTES)
     try:
         # JSON-RPC 2.0 ids are a string, number or null: never echo another type.
-        for bad_id in ({"a": 1}, [1], True):
-            req = {"jsonrpc": "2.0", "id": bad_id, "method": "peer.list_peers", "params": {}}
-            writer.write((json.dumps(req) + "\n").encode())
+        # NaN and Infinity are not JSON numbers, so they go as raw text.
+        for bad_id in ('{"a":1}', "[1]", "true", "NaN", "Infinity", "-Infinity"):
+            req = '{"jsonrpc":"2.0","id":' + bad_id + ',"method":"peer.list_peers","params":{}}'
+            writer.write((req + "\n").encode())
             await writer.drain()
             line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=5.0)
-            msg = json.loads(line)
+            msg = _strict_json(line)
             assert "id" in msg and msg["id"] is None, (bad_id, msg)
             assert msg["error"]["code"] == -32600, (bad_id, msg)
     finally:

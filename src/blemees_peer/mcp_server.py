@@ -41,7 +41,8 @@ log = logging.getLogger("blemees-peer-mcp")
 MCP_PROTOCOL_VERSION = "2024-11-05"
 INBOX_MAXLEN = 1000
 # Bound on the startup peer.hello: whatever listens at the socket may accept
-# the connection and never reply. The sidecar then goes offline.
+# the connection and never reply. The sidecar then goes offline for the
+# session, with no reconnect. SPEC §8 gives the reason for 5 s.
 HELLO_TIMEOUT_S = 5.0
 
 
