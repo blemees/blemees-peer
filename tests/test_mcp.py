@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from blemees_peer.addressing import normalize_path
 from blemees_peer.framing import MAX_LINE_BYTES
 from blemees_peer.mcp_server import (
     McpServer,
@@ -56,6 +59,37 @@ def test_resolve_sid_invalid_mints_fresh(monkeypatch) -> None:
 def test_resolve_home_returns_env(monkeypatch) -> None:
     monkeypatch.setenv("BLEMEES_AGENT_HOME", "~/foo")
     assert resolve_home_at_startup() == "~/foo"
+
+
+def test_resolve_home_invalid_warns_and_uses_cwd(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("BLEMEES_AGENT_HOME", "relative/../path")
+    with caplog.at_level(logging.WARNING, logger="blemees-peer-mcp"):
+        home = resolve_home_at_startup()
+    assert home == normalize_path(os.getcwd())
+    assert "ignoring BLEMEES_AGENT_HOME='relative/../path'" in caplog.text
+
+
+def test_resolve_sid_invalid_warns(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("BLEMEES_AGENT_SID", "not-a-valid-sid")
+    with caplog.at_level(logging.WARNING, logger="blemees-peer-mcp"):
+        resolve_sid_at_startup()
+    assert "ignoring BLEMEES_AGENT_SID='not-a-valid-sid'" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("home", "sid"),
+    [(None, None), ("", ""), ("~/foo", "sess_AAAAAAAAAAAAAAAA")],
+)
+def test_resolve_home_and_sid_quiet_when_unset_or_valid(monkeypatch, caplog, home, sid) -> None:
+    for name, value in (("BLEMEES_AGENT_HOME", home), ("BLEMEES_AGENT_SID", sid)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    with caplog.at_level(logging.WARNING, logger="blemees-peer-mcp"):
+        resolve_home_at_startup()
+        resolve_sid_at_startup()
+    assert caplog.records == []
 
 
 # --- peer_await ------------------------------------------------------------

@@ -749,6 +749,8 @@ def resolve_home_at_startup() -> str:
     env = os.environ.get("BLEMEES_AGENT_HOME")
     if env and is_normalized_path(env):
         return env
+    if env:
+        log.warning("ignoring BLEMEES_AGENT_HOME=%r: must be a normalized path", env)
     return normalize_path(os.getcwd())
 
 
@@ -765,6 +767,8 @@ def resolve_sid_at_startup() -> str:
     env = os.environ.get("BLEMEES_AGENT_SID")
     if env and is_valid_sid(env):
         return env
+    if env:
+        log.warning("ignoring BLEMEES_AGENT_SID=%r: must match sess_[A-Za-z0-9_-]{16}", env)
     return mint_sid()
 
 
