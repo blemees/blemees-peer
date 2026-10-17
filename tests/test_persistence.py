@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from blemees_peer.messages import Message, mint_message_id, now_ts
@@ -37,6 +38,15 @@ def test_persistent_deque_append_and_load(tmp_path: Path) -> None:
     fresh = PersistentDeque(path, maxlen=5)
     fresh.load()
     assert [m.body for m in fresh.deque] == ["one", "two"]
+
+
+def test_persistent_deque_flush_fsyncs_tmp_file(tmp_path: Path, monkeypatch) -> None:
+    synced: list[int] = []
+    monkeypatch.setattr(os, "fsync", synced.append)
+    buf = PersistentDeque(tmp_path / "x.jsonl", maxlen=5)
+    buf.append(_make_msg())
+    buf.append(_make_msg())
+    assert len(synced) == 2
 
 
 def test_persistent_deque_bounded(tmp_path: Path) -> None:

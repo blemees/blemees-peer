@@ -25,8 +25,9 @@ from pathlib import Path
 from typing import Any
 
 from blemees_peer._version import __version__
-from blemees_peer.addressing import is_normalized_path, normalize_path
+from blemees_peer.addressing import is_normalized_path, mint_sid, normalize_path
 from blemees_peer.client import PeerClient, RemoteError
+from blemees_peer.errors import SID_IN_USE
 from blemees_peer.framing import MAX_LINE_BYTES, LineTooLongError, read_line
 
 log = logging.getLogger("blemees-peer-mcp")
@@ -207,9 +208,24 @@ class McpServer:
             self.peer = _OfflinePeerClient(str(e))  # type: ignore[assignment]
 
         try:
-            hello = await self.peer.hello(self.sid, self.home)
+            try:
+                hello = await self.peer.hello(self.sid, self.home)
+            except RemoteError as e:
+                if e.code != SID_IN_USE:
+                    raise
+                # Most likely a stale session still holds BLEMEES_AGENT_SID.
+                # blemees-peerd closed the connection, so retry once with a
+                # fresh sid on a new one.
+                new_sid = mint_sid()
+                log.warning("sid %s already in use; retrying hello as %s", self.sid, new_sid)
+                with contextlib.suppress(Exception):
+                    await self.peer.close()
+                self.peer = PeerClient(self.socket_path)
+                await self.peer.connect()
+                hello = await self.peer.hello(new_sid, self.home)
+                self.sid = new_sid
             log.info("hello ok: %s", hello)
-        except (RemoteError, RuntimeError, ConnectionError) as e:
+        except (RemoteError, RuntimeError, OSError) as e:
             log.error("hello failed: %s", e)
 
         if self.initial_alias:
@@ -666,8 +682,9 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "peer_history",
         "description": (
-            "Replay persisted messages for a topic (full ring buffer) "
-            "or DM address (queued/undelivered messages only)."
+            "Replay persisted messages, oldest first: for a topic, its "
+            "ring buffer; for a home: DM address, only the DMs still "
+            "queued (undelivered). Delivered DMs are not kept."
         ),
         "inputSchema": {
             "type": "object",
@@ -782,7 +799,7 @@ def resolve_sid_at_startup() -> str:
     transitively reaches its MCP subprocesses); otherwise mints a
     fresh sid.
     """
-    from blemees_peer.addressing import is_valid_sid, mint_sid
+    from blemees_peer.addressing import is_valid_sid
 
     env = os.environ.get("BLEMEES_AGENT_SID")
     if env and is_valid_sid(env):

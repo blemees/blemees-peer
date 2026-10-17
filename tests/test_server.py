@@ -51,6 +51,37 @@ async def test_hello_with_unnormalized_home_rejected(peerd_server, tmp_socket_pa
         await client.close()
 
 
+@pytest.mark.parametrize("case", ["unnormalized_home", "sid_in_use"])
+async def test_failed_hello_closes_connection(case, client_factory, tmp_socket_path) -> None:
+    # SPEC §8: a failed hello sends the error, then closes the connection.
+    sid = mint_sid()
+    home = "/tmp/peer-test-hello-fail"
+    if case == "sid_in_use":
+        await client_factory(sid=sid)
+        code = -32011
+    else:
+        home = "relative/path"
+        code = -32602
+    reader, writer = await asyncio.open_unix_connection(str(tmp_socket_path), limit=MAX_LINE_BYTES)
+    try:
+        req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "peer.hello",
+            "params": {"sid": sid, "home": home},
+        }
+        writer.write((json.dumps(req) + "\n").encode())
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=5.0)
+        msg = json.loads(line)
+        assert msg["id"] == 1 and msg["error"]["code"] == code, msg
+        assert await asyncio.wait_for(reader.read(), timeout=5.0) == b""
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
 # --- DMs --------------------------------------------------------------------
 
 
@@ -83,6 +114,19 @@ async def test_dm_to_offline_queued_then_drained(client_factory, tmp_socket_path
         assert note["params"]["body"] == "for-later"
     finally:
         await late.close()
+
+
+async def test_dm_history_is_undelivered_queue_only(client_factory) -> None:
+    # SPEC §5/§7: DM history is the undelivered queue; delivered DMs are not kept.
+    sender = await client_factory(home="/tmp/peer-test-A")
+    await sender.send(to="home:/tmp/peer-test-hist", body="queued")
+    res = await sender.history("home:/tmp/peer-test-hist")
+    assert [m["body"] for m in res["messages"]] == ["queued"]
+    recipient = await client_factory(home="/tmp/peer-test-hist")
+    note = await recipient.next_notification(timeout=2.0)
+    assert note["method"] == "peer.message" and note["params"]["body"] == "queued"
+    res = await sender.history("home:/tmp/peer-test-hist")
+    assert res["messages"] == []
 
 
 async def test_dm_alias_resolves(client_factory) -> None:

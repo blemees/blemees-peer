@@ -2,7 +2,9 @@
 
 For v0.1 we keep this deliberately simple: each address maps to one
 ``PersistentDeque`` whose entire contents are atomically rewritten on
-every mutation. With the default bounds (100 messages per DM queue,
+every mutation: written to a temp file, fsynced, then renamed over the
+old file. The directory is not fsynced, so a crash can lose the most
+recent change. With the default bounds (100 messages per DM queue,
 1000 per topic ring buffer) write cost stays bounded; switching to
 append + periodic compaction is a v0.2 concern only if real-world
 throughput pushes the issue.
@@ -119,6 +121,8 @@ class PersistentDeque:
             for msg in self.deque:
                 f.write(json.dumps(msg.to_persisted(), separators=(",", ":")))
                 f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.path)
 
 
