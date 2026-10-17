@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "blemees-peer"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Peer communication daemon and MCP sidecar for blemees agents"
 readme = "README.md"
 license = { text = "MIT" }
@@ -39,6 +39,9 @@ blemees-peer-mcp = "blemees_peer.mcp:main"
 Homepage = "https://github.com/blemees/blemees-peer"
 Issues = "https://github.com/blemees/blemees-peer/issues"
 Spec = "https://github.com/blemees/blemees-peer/blob/main/docs/SPEC.md"
+
+[tool.hatch.version]
+path = "src/blemees_peer/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/blemees_peer"]
