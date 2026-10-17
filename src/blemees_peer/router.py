@@ -319,10 +319,9 @@ class Router:
         if not self.persistence.dms.has_messages(address):
             return
         buf = self.persistence.dms.get(address)
-        msgs = buf.drain()
+        # Leave DMs the filter rejects queued for a later claimant
+        msgs = buf.drain_matching(lambda m: conn.matches_dm_filter(m.from_addr))
         for msg in msgs:
-            if not conn.matches_dm_filter(msg.from_addr):
-                continue
             await conn.send_notification("peer.message", msg.to_wire())
 
     # ------------------------------------------------------------------
