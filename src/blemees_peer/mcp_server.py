@@ -451,26 +451,23 @@ async def _tool_inbox(s: McpServer, args: dict[str, Any]) -> Any:
 
 async def _tool_await(s: McpServer, args: dict[str, Any]) -> Any:
     timeout = args.get("timeout")
-    timeout_s = float(timeout) if timeout is not None else None
-    if s.inbox:
-        msg = s.inbox.popleft()
-        if not s.inbox:
-            s._inbox_event.clear()
-        return msg
-    s._inbox_event.clear()
-    try:
-        if timeout_s is None:
-            await s._inbox_event.wait()
-        else:
-            await asyncio.wait_for(s._inbox_event.wait(), timeout=timeout_s)
-    except TimeoutError:
-        return {"timeout": True}
-    if s.inbox:
-        msg = s.inbox.popleft()
-        if not s.inbox:
-            s._inbox_event.clear()
-        return msg
-    return {"timeout": True}
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + float(timeout) if timeout is not None else None
+    # Loop: another peer_await/peer_inbox caller can take the message
+    # between our wake-up and our pop, so an empty inbox after a wake-up
+    # means "wait again", not "timed out".
+    while True:
+        if s.inbox:
+            msg = s.inbox.popleft()
+            if not s.inbox:
+                s._inbox_event.clear()
+            return msg
+        s._inbox_event.clear()
+        remaining = deadline - loop.time() if deadline is not None else None
+        try:
+            await asyncio.wait_for(s._inbox_event.wait(), timeout=remaining)
+        except TimeoutError:
+            return {"timeout": True}
 
 
 async def _tool_set_alias(s: McpServer, args: dict[str, Any]) -> Any:

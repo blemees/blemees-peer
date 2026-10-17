@@ -12,6 +12,8 @@ import pytest
 
 from blemees_peer.framing import MAX_LINE_BYTES
 from blemees_peer.mcp_server import (
+    McpServer,
+    _tool_await,
     resolve_alias_at_startup,
     resolve_home_at_startup,
     resolve_sid_at_startup,
@@ -54,6 +56,58 @@ def test_resolve_sid_invalid_mints_fresh(monkeypatch) -> None:
 def test_resolve_home_returns_env(monkeypatch) -> None:
     monkeypatch.setenv("BLEMEES_AGENT_HOME", "~/foo")
     assert resolve_home_at_startup() == "~/foo"
+
+
+# --- peer_await ------------------------------------------------------------
+
+
+def _offline_server() -> McpServer:
+    # Never connects; the tests below only drive the inbox directly.
+    return McpServer(Path("/nonexistent/peerd.sock"), "/tmp/peer-await", "sess_AWAITAWAITAWAITA")
+
+
+def _deliver(s: McpServer, body: str) -> None:
+    s.inbox.append({"method": "peer.message", "params": {"body": body}})
+    s._inbox_event.set()
+
+
+async def test_peer_await_keeps_waiting_when_message_taken() -> None:
+    """Two concurrent waiters, one message: the waiter that wakes to an
+    empty inbox must keep waiting, not report a timeout it never had.
+    """
+    s = _offline_server()
+    first = asyncio.create_task(_tool_await(s, {}))
+    second = asyncio.create_task(_tool_await(s, {}))
+    await asyncio.sleep(0.01)
+
+    _deliver(s, "one")
+    await asyncio.sleep(0.01)
+    done = [t for t in (first, second) if t.done()]
+    pending = [t for t in (first, second) if not t.done()]
+    assert len(done) == 1 and len(pending) == 1
+    assert done[0].result()["params"]["body"] == "one"
+
+    _deliver(s, "two")
+    result = await asyncio.wait_for(pending[0], timeout=1.0)
+    assert result["params"]["body"] == "two"
+
+
+async def test_peer_await_times_out_on_empty_inbox() -> None:
+    s = _offline_server()
+    assert await _tool_await(s, {"timeout": 0.05}) == {"timeout": True}
+
+
+async def test_peer_await_timeout_is_total_not_per_wake() -> None:
+    s = _offline_server()
+    taker = asyncio.create_task(_tool_await(s, {}))
+    waiter = asyncio.create_task(_tool_await(s, {"timeout": 0.2}))
+    await asyncio.sleep(0.01)
+    _deliver(s, "one")
+    assert (await asyncio.wait_for(taker, timeout=1.0))["params"]["body"] == "one"
+    # The timed waiter lost the race and keeps waiting until its deadline
+    await asyncio.sleep(0.01)
+    assert not waiter.done()
+    assert await asyncio.wait_for(waiter, timeout=1.0) == {"timeout": True}
 
 
 # --- subprocess plumbing ---------------------------------------------------
@@ -507,3 +561,86 @@ async def test_invalid_json_stdin_line_gets_parse_error_with_null_id(mcp_proc) -
     assert err["error"]["code"] == -32700, err
     await _send(mcp_proc, {"jsonrpc": "2.0", "id": 8, "method": "ping", "params": {}})
     assert "result" in await _recv_until_id(mcp_proc, 8)
+
+
+# --- peer_inbox / peer_await over MCP --------------------------------------
+
+
+async def _init(proc: asyncio.subprocess.Process) -> None:
+    # The initialize response comes after the sidecar's peer.hello
+    await _send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    await _recv_until_id(proc, 1)
+    await _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+
+
+async def _call_tool(
+    proc: asyncio.subprocess.Process,
+    request_id: int,
+    name: str,
+    arguments: dict[str, Any],
+) -> Any:
+    await _send(
+        proc,
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+    )
+    resp = await _recv_until_id(proc, request_id)
+    assert resp["result"]["isError"] is False
+    return json.loads(resp["result"]["content"][0]["text"])
+
+
+async def _dm_sidecar(tmp_socket_path: Path, body: str) -> Any:
+    """Connect a second peer and DM the mcp_proc sidecar; return the client."""
+    from blemees_peer.client import PeerClient
+
+    sender = PeerClient(tmp_socket_path)
+    await sender.connect()
+    await sender.hello("sess_SENDSENDSENDSEND", "/tmp/peer-test-sender")
+    res = await sender.send(to="home:/tmp/peer-test-mcp#sess_MCP1MCP1MCP1MCP1", body=body)
+    assert res["delivered"] == 1
+    return sender
+
+
+async def test_peer_await_returns_message_via_tool_call(mcp_proc, tmp_socket_path) -> None:
+    await _init(mcp_proc)
+    sender = await _dm_sidecar(tmp_socket_path, "await-me")
+    try:
+        # The sender's peer.peer_joined can arrive first; skip it
+        for request_id in range(2, 6):
+            note = await _call_tool(mcp_proc, request_id, "peer_await", {"timeout": 5})
+            if note.get("method") == "peer.message":
+                break
+        assert note["method"] == "peer.message"
+        assert note["params"]["body"] == "await-me"
+        assert note["params"]["from"] == "home:/tmp/peer-test-sender#sess_SENDSENDSENDSEND"
+    finally:
+        await sender.close()
+
+
+async def test_peer_await_timeout_via_tool_call(mcp_proc) -> None:
+    await _init(mcp_proc)
+    result = await _call_tool(mcp_proc, 2, "peer_await", {"timeout": 0.1})
+    assert result == {"timeout": True}
+
+
+async def test_peer_inbox_returns_message_via_tool_call(mcp_proc, tmp_socket_path) -> None:
+    await _init(mcp_proc)
+    sender = await _dm_sidecar(tmp_socket_path, "inbox-me")
+    try:
+        messages: list[dict[str, Any]] = []
+        for request_id in range(2, 52):
+            out = await _call_tool(mcp_proc, request_id, "peer_inbox", {})
+            messages += [n for n in out["messages"] if n["method"] == "peer.message"]
+            if messages:
+                break
+            await asyncio.sleep(0.05)
+        assert [n["params"]["body"] for n in messages] == ["inbox-me"]
+        # Drained: a second call returns no messages
+        out = await _call_tool(mcp_proc, 100, "peer_inbox", {})
+        assert out == {"messages": []}
+    finally:
+        await sender.close()
