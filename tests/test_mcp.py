@@ -651,6 +651,23 @@ async def test_invalid_json_stdin_line_gets_parse_error_with_null_id(mcp_proc) -
     assert "result" in await _recv_until_id(mcp_proc, 8)
 
 
+async def test_message_without_id_or_method_gets_invalid_request_with_null_id(
+    mcp_proc,
+) -> None:
+    for msg in ({"jsonrpc": "2.0", "params": {}}, {"jsonrpc": "2.0", "method": 42}):
+        await _send(mcp_proc, msg)
+        err = await _recv(mcp_proc)
+        assert err is not None
+        assert "id" in err and err["id"] is None, err
+        assert err["error"]["code"] == -32600, err
+    # A valid notification still gets no reply: the next message is the
+    # response to the ping.
+    await _send(mcp_proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    await _send(mcp_proc, {"jsonrpc": "2.0", "id": 9, "method": "ping", "params": {}})
+    reply = await _recv(mcp_proc)
+    assert reply is not None and reply.get("id") == 9 and "result" in reply, reply
+
+
 # --- peer_inbox / peer_await over MCP --------------------------------------
 
 
