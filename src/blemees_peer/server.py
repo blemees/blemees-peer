@@ -194,11 +194,13 @@ class Server:
         method = request.get("method")
         params = request.get("params") or {}
 
+        # A message that fails these two checks is not a valid notification,
+        # so it gets an error even without an id (then "id": null).
         if request.get("jsonrpc") != "2.0":
-            await self._send_error(conn, request_id, INVALID_REQUEST, "jsonrpc must be '2.0'")
+            await conn.send_error(request_id, INVALID_REQUEST, "jsonrpc must be '2.0'")
             return
         if not isinstance(method, str):
-            await self._send_error(conn, request_id, INVALID_REQUEST, "method must be a string")
+            await conn.send_error(request_id, INVALID_REQUEST, "method must be a string")
             return
         if not isinstance(params, dict):
             await self._send_error(conn, request_id, INVALID_PARAMS, "params must be an object")
