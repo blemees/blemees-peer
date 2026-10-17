@@ -92,7 +92,9 @@ class StdioJsonRpc:
         request_id = msg.get("id")
 
         if not isinstance(method, str):
-            await self._send_error(request_id, -32600, "method must be a string")
+            # Not a valid notification, so it gets an error even without an
+            # id (then "id": null).
+            await self._write_error(request_id, -32600, "method must be a string")
             return
         if not isinstance(params, dict):
             await self._send_error(request_id, -32602, "params must be an object")
