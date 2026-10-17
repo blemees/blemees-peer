@@ -27,6 +27,12 @@ from blemees_peer.framing import MAX_LINE_BYTES, LineTooLongError, read_line
 
 log = logging.getLogger("blemees-blemees-peerd.client")
 
+_CLOSED_MESSAGE = "blemees-peerd connection closed"
+
+# Queued on the notification queue once the read loop exits, so blocked and
+# later ``next_notification()`` callers raise instead of waiting forever.
+_DISCONNECTED: Any = object()
+
 
 class RemoteError(Exception):
     """Raised when the server returns a JSON-RPC error response."""
@@ -50,6 +56,7 @@ class PeerClient:
         self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._read_task: asyncio.Task[None] | None = None
         self._closed = False
+        self._disconnected = False
 
     async def connect(self) -> None:
         if self._writer is not None:
@@ -74,10 +81,7 @@ class PeerClient:
                 await asyncio.wait_for(self._read_task, timeout=1.0)
             except (TimeoutError, Exception):
                 self._read_task.cancel()
-        for fut in self._pending.values():
-            if not fut.done():
-                fut.set_exception(ConnectionError("blemees-peerd connection closed"))
-        self._pending.clear()
+        self._fail_pending()
 
     async def __aenter__(self) -> PeerClient:
         await self.connect()
@@ -93,6 +97,8 @@ class PeerClient:
     async def _call(self, method: str, params: dict[str, Any]) -> Any:
         if self._writer is None:
             raise RuntimeError("client not connected")
+        if self._closed or self._disconnected:
+            raise ConnectionError(_CLOSED_MESSAGE)
         self._next_id += 1
         rid = self._next_id
         fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
@@ -102,10 +108,32 @@ class PeerClient:
         # peerd would discard the line and reply without an id; fail here instead.
         if len(encoded) > MAX_LINE_BYTES:
             raise RemoteError(INVALID_PARAMS, "request exceeds size limit")
+        # Register before writing: if the read loop dies from here on, its
+        # cleanup fails this future, so ``await fut`` cannot hang.
         self._pending[rid] = fut
-        self._writer.write(encoded)
-        await self._writer.drain()
-        return await fut
+        try:
+            try:
+                self._writer.write(encoded)
+                await self._writer.drain()
+            except OSError as e:  # BrokenPipeError, ConnectionResetError, ...
+                if not fut.done():
+                    fut.set_exception(ConnectionError(f"{_CLOSED_MESSAGE}: {e}"))
+            return await fut
+        finally:
+            self._pending.pop(rid, None)
+
+    def _fail_pending(self) -> None:
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError(_CLOSED_MESSAGE))
+        self._pending.clear()
+
+    def _mark_disconnected(self) -> None:
+        """Fail in-flight calls and wake notification waiters. Idempotent."""
+        self._fail_pending()
+        if not self._disconnected:
+            self._disconnected = True
+            self._notifications.put_nowait(_DISCONNECTED)
 
     async def _read_loop(self) -> None:
         assert self._reader is not None
@@ -149,6 +177,9 @@ class PeerClient:
             raise
         except Exception:
             log.exception("client read loop crashed")
+        finally:
+            # EOF, reset, crash or cancellation: the connection is unusable.
+            self._mark_disconnected()
 
     # ------------------------------------------------------------------
     # Methods
@@ -235,18 +266,33 @@ class PeerClient:
         """Return the next queued notification, blocking up to *timeout* seconds.
 
         Raises ``asyncio.TimeoutError`` if *timeout* elapses with no
-        notification queued.
+        notification queued, and ``ConnectionError`` once the connection
+        to blemees-peerd is gone and every earlier notification was read.
         """
+        if self._disconnected and self._notifications.empty():
+            # Do not rely only on the sentinel: it can be lost if a waiter
+            # is cancelled as its ``get()`` completes (py3.11 ``wait_for``).
+            raise ConnectionError(_CLOSED_MESSAGE)
         if timeout is None:
-            return await self._notifications.get()
-        return await asyncio.wait_for(self._notifications.get(), timeout=timeout)
+            note = await self._notifications.get()
+        else:
+            note = await asyncio.wait_for(self._notifications.get(), timeout=timeout)
+        if note is _DISCONNECTED:
+            # Put it back so every later (or concurrent) caller raises too.
+            self._notifications.put_nowait(_DISCONNECTED)
+            raise ConnectionError(_CLOSED_MESSAGE)
+        return note
 
     def drain_notifications(self) -> list[dict[str, Any]]:
         """Pop every currently-queued notification without blocking."""
         out: list[dict[str, Any]] = []
         while True:
             try:
-                out.append(self._notifications.get_nowait())
+                note = self._notifications.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            if note is not _DISCONNECTED:
+                out.append(note)
+        if self._disconnected:
+            self._notifications.put_nowait(_DISCONNECTED)
         return out
