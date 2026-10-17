@@ -180,6 +180,15 @@ async def _recv(proc: asyncio.subprocess.Process) -> dict[str, Any] | None:
     return json.loads(line)
 
 
+def _strict_json(line: bytes) -> Any:
+    """Parse *line* as strict JSON: NaN and Infinity are an error."""
+
+    def reject(name: str) -> None:
+        raise ValueError(f"non-JSON constant {name}")
+
+    return json.loads(line, parse_constant=reject)
+
+
 async def _recv_until_id(
     proc: asyncio.subprocess.Process,
     request_id: int,
@@ -691,10 +700,15 @@ async def test_request_with_invalid_id_type_gets_invalid_request_with_null_id(
     mcp_proc,
 ) -> None:
     # JSON-RPC 2.0 ids are a string, number or null: never echo another type.
-    for bad_id in ({"a": 1}, [1], True):
-        await _send(mcp_proc, {"jsonrpc": "2.0", "id": bad_id, "method": "ping", "params": {}})
-        err = await _recv(mcp_proc)
-        assert err is not None
+    # NaN and Infinity are not JSON numbers, so they go as raw text.
+    assert mcp_proc.stdin is not None and mcp_proc.stdout is not None
+    for bad_id in ('{"a":1}', "[1]", "true", "NaN", "Infinity", "-Infinity"):
+        req = '{"jsonrpc":"2.0","id":' + bad_id + ',"method":"ping","params":{}}'
+        mcp_proc.stdin.write((req + "\n").encode("utf-8"))
+        await mcp_proc.stdin.drain()
+        line = await asyncio.wait_for(mcp_proc.stdout.readline(), timeout=10.0)
+        assert line, bad_id
+        err = _strict_json(line)
         assert "id" in err and err["id"] is None, (bad_id, err)
         assert err["error"]["code"] == -32600, (bad_id, err)
 

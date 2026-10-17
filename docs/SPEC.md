@@ -443,9 +443,17 @@ not a goal of `blemees-peerd`.
 | Line over 4 MiB (frame limit)        | Line discarded; returns `-32700` with `"id": null`; connection stays open. A response that would exceed the limit is replaced by a `-32603` error with the same id |
 | Line that is not valid JSON or not a JSON object | Returns `-32700` (invalid JSON) or `-32600` (not an object) with `"id": null`; connection stays open |
 | Message with no `id` that is not a valid notification (e.g. no string `method`) | Returns `-32600` with `"id": null`. A response object (`result` or `error`, no `method`) gets no reply, with or without an `id` |
-| Request `id` that is not a string, number or null (object, array, `true`/`false`) | Returns `-32600` with `"id": null`; the id is not echoed |
-| Socket accepts but `peer.hello` gets no reply | MCP sidecar gives up after 5 s, closes the connection and continues offline, as when `blemees-peerd` is not running |
+| Request `id` that is not a string, number or null (object, array, `true`/`false`, or a non-finite number: `NaN`, `Infinity`, `-Infinity`) | Returns `-32600` with `"id": null`; the id is not echoed |
+| Socket accepts but `peer.hello` gets no reply | MCP sidecar gives up after 5 s, closes the connection and stays offline for the rest of the session, as when `blemees-peerd` is not running. It does not reconnect: restart the session once `blemees-peerd` is healthy |
 | `send`/`publish` body over 4 MiB − 64 KiB | Returns `-32602 message too large` (`data.max_body_bytes`); nothing persisted or delivered |
+
+Why 5 s for `peer.hello`: `blemees-peerd` answers on a local Unix socket
+with no network hop, so a healthy daemon replies quickly, and 5 s
+leaves a wide margin for that. The hello path
+does no fsync (draining a DM queue deletes its file). Two things can
+still delay the reply: the peer's queued DMs are sent before the hello
+response, and every `send`/`publish` rewrites and fsyncs a file on the
+daemon's single event loop, so a busy daemon is slower to answer.
 
 ## 9. Agent integration
 
